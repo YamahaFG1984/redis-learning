@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 13 章 用 Redis 做限流 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 13 章 · 补充</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 13 章（补充）用 Redis 做限流</h1>
+    <blockquote><p>本章是原书没有覆盖的内容。原书第 6 章的计数信号量解决的是"并发数限制"（同一时刻最多 N 个持有者），而<strong>限流（rate limiting）解决的是"单位时间内最多 N 次请求"</strong>——这是今天几乎所有 API 网关、SaaS 计费、防刷系统里最高频的 Redis 用例之一，原书完全没有专门讨论。</p></blockquote>
+
+    <h2>13.0 为什么限流现在这么重要</h2>
+    <p>2013 年互联网的 API 生态远没有今天这么开放——今天几乎每个对外接口都要考虑：单个用户/IP/API Key 的调用频率上限、防止爬虫/刷单、按套餐分级限流（免费版 100 次/分钟，付费版 10000 次/分钟）、保护后端脆弱依赖（比如调用第三方短信/支付接口有配额）。Redis 天然适合做限流的原因和原书全书的主题一致：<strong>限流需要极低延迟的原子计数，Redis 内存操作 + 原子命令正好满足这个需求</strong>。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+    C["客户端"] --> G["API 网关 / 应用服务"]
+    G -->|"Lua 脚本原子判断"| R[("Redis")]
+    R -->|"允许 / 拒绝"| G
+    G -->|"放行"| S["后端服务"]
+    G -->|"429 Too Many Requests"| C
+      </div>
+      <figcaption>限流的基本架构：判断逻辑必须是原子操作，否则并发请求会绕过计数</figcaption>
+    </figure>
+
+    <h2>13.1 固定窗口计数器（最简单，但有边界问题）</h2>
+    <p>最直观的实现：每个时间窗口一个 key，<code>INCR</code> 计数，第一次访问时设置过期时间。</p>
+
+<pre><code class="language-lua">-- fixed_window.lua
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+
+local current = redis.call('INCR', key)
+if current == 1 then
+    redis.call('EXPIRE', key, window)
+end
+if current > limit then
+    return 0  -- 拒绝
+end
+return 1      -- 允许
+</code></pre>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Start(["请求到达"]) --> Incr["INCR key"]
+    Incr --> First{"是第一次访问?<br/>INCR 结果 == 1"}
+    First -- 是 --> SetExpire["EXPIRE key window"]
+    First -- 否 --> Check
+    SetExpire --> Check{"当前计数 > limit ?"}
+    Check -- 是 --> Reject(["拒绝请求"])
+    Check -- 否 --> Allow(["允许请求"])
+      </div>
+      <figcaption>固定窗口计数器的判断流程</figcaption>
+    </figure>
+
+    <p><strong>已知问题</strong>：固定窗口在边界处会出现"双倍突发"——比如限制是"每分钟 100 次"，用户可以在第 59 秒发 100 次，第 61 秒（新窗口开始）再发 100 次，2 秒内实际通过了 200 次请求，远超预期的限流强度。这是固定窗口算法广为人知的缺陷，几乎所有讲限流的资料都会提到。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+    subgraph W1["窗口 1 (0s - 60s)"]
+        A["59s 内发出 100 次请求<br/>已达到上限"]
+    end
+    subgraph W2["窗口 2 (60s - 120s)"]
+        B["61s 起再发 100 次<br/>窗口重置，配额已满"]
+    end
+    W1 -. "仅隔 2 秒，实际通过 200 次请求" .-> W2
+      </div>
+      <figcaption>固定窗口的边界双倍突发问题</figcaption>
+    </figure>
+
+    <h2>13.2 滑动窗口日志（精确，但耗内存）</h2>
+    <p>用 ZSET 存每次请求的时间戳作为 score，每次请求先清理窗口外的旧记录，再看窗口内还剩多少配额：</p>
+
+<pre><code class="language-lua">-- sliding_window_log.lua
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local count = redis.call('ZCARD', key)
+if count < limit then
+    redis.call('ZADD', key, now, now .. '-' .. math.random())
+    redis.call('EXPIRE', key, window)
+    return 1
+end
+return 0
+</code></pre>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Start(["请求到达, 时间戳 now"]) --> Clean["ZREMRANGEBYSCORE key 0 (now-window)<br/>清理窗口外的旧记录"]
+    Clean --> Count["ZCARD key<br/>统计窗口内剩余请求数"]
+    Count --> Check{"count < limit ?"}
+    Check -- 是 --> Add["ZADD key now member<br/>EXPIRE key window"]
+    Add --> Allow(["允许请求"])
+    Check -- 否 --> Reject(["拒绝请求"])
+      </div>
+      <figcaption>滑动窗口日志：每个请求都是 ZSET 里的一条精确记录</figcaption>
+    </figure>
+
+    <p><strong>精确但代价高</strong>：每个请求都要存一条 ZSET 成员，高频场景下内存占用和命令开销都比固定窗口大很多——这正是原书第 6 章计数信号量用到的同一个 ZSET 模式（清理过期成员 + 检查数量），只是应用场景从"并发限制"换成了"频率限制"。</p>
+
+    <h2>13.3 滑动窗口计数器（工程上最常用的折中方案）</h2>
+    <p>结合固定窗口的低开销和滑动窗口的精确性：用当前窗口和上一个窗口的计数按比例加权估算。这是 Cloudflare 等公司公开分享过的生产方案：</p>
+
+<pre><code class="language-lua">-- sliding_window_counter.lua
+local key_prefix = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])   -- 窗口大小，如 60 秒
+local limit = tonumber(ARGV[3])
+
+local current_window = math.floor(now / window)
+local previous_window = current_window - 1
+local elapsed_ratio = (now % window) / window
+
+local current_key = key_prefix .. ':' .. current_window
+local previous_key = key_prefix .. ':' .. previous_window
+
+local current_count = tonumber(redis.call('GET', current_key) or '0')
+local previous_count = tonumber(redis.call('GET', previous_key) or '0')
+
+-- 加权估算：越接近当前窗口末尾，上一个窗口的权重越低
+local estimated = previous_count * (1 - elapsed_ratio) + current_count
+
+if estimated >= limit then
+    return 0
+end
+
+redis.call('INCR', current_key)
+redis.call('EXPIRE', current_key, window * 2)
+return 1
+</code></pre>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Start(["请求到达, 时间戳 now"]) --> Calc["定位 current_window / previous_window<br/>elapsed_ratio = (now mod window) / window"]
+    Calc --> Est["estimated = previous_count × (1 - elapsed_ratio) + current_count"]
+    Est --> Check{"estimated >= limit ?"}
+    Check -- 是 --> Reject(["拒绝请求"])
+    Check -- 否 --> Incr["INCR current_window_key<br/>EXPIRE window × 2"]
+    Incr --> Allow(["允许请求"])
+      </div>
+      <figcaption>滑动窗口计数器：用上一窗口的加权计数平滑边界效应</figcaption>
+    </figure>
+
+    <h2>13.4 令牌桶（Token Bucket）—— 允许突发流量的场景</h2>
+    <p>令牌桶允许短时间内的突发请求（只要桶里有攒下的令牌），比滑动窗口更贴近真实用户行为（用户不是均匀发请求的）。</p>
+
+<pre><code class="language-lua">-- token_bucket.lua
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])       -- 每秒生成的令牌数
+local capacity = tonumber(ARGV[3])   -- 桶容量
+local requested = tonumber(ARGV[4])  -- 本次请求消耗的令牌数
+
+local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens = tonumber(bucket[1])
+local last_refill = tonumber(bucket[2])
+
+if tokens == nil then
+    tokens = capacity
+    last_refill = now
+end
+
+local delta = math.max(0, now - last_refill)
+tokens = math.min(capacity, tokens + delta * rate)
+
+if tokens >= requested then
+    tokens = tokens - requested
+    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+    redis.call('EXPIRE', key, math.ceil(capacity / rate) * 2)
+    return 1
+end
+
+redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+redis.call('EXPIRE', key, math.ceil(capacity / rate) * 2)
+return 0
+</code></pre>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Start(["请求到达, 消耗 requested 个令牌"]) --> Read["HMGET key tokens last_refill"]
+    Read --> Refill["按 (now - last_refill) × rate 补充令牌<br/>tokens = min(capacity, tokens + delta)"]
+    Refill --> Check{"tokens >= requested ?"}
+    Check -- 是 --> Deduct["tokens -= requested<br/>写回 tokens / last_refill"]
+    Deduct --> Allow(["允许请求"])
+    Check -- 否 --> WriteBack["写回补充后的 tokens<br/>(未扣减)"]
+    WriteBack --> Reject(["拒绝请求"])
+      </div>
+      <figcaption>令牌桶：按时间流逝持续补充令牌，允许攒够配额后的突发消耗</figcaption>
+    </figure>
+
+    <h2>13.5 官方/现成方案：redis-cell 模块与 GCRA 算法</h2>
+    <p>如果不想自己维护 Lua 脚本，Redis 有一个现成的限流模块 <strong>redis-cell</strong>（实现 GCRA——Generic Cell Rate Algorithm，本质是令牌桶的一种数学等价形式），提供 <code>CL.THROTTLE</code> 命令：</p>
+
+<pre><code class="language-bash">CL.THROTTLE user123 15 30 60
+--          key      最大突发 每60秒30次 时间窗口
+</code></pre>
+
+    <p>一条命令返回是否允许、剩余配额、下次重试等待时间——不需要自己写 Lua 脚本、不需要处理边界情况。生产环境如果 Redis 部署方式支持加载模块（如自建、Redis Stack），<strong>优先用 <code>redis-cell</code> 而不是重新发明轮子</strong>；如果是不支持自定义模块的托管服务（部分云厂商的基础版托管 Redis 不支持模块），退回到上面 13.3/13.4 节的 Lua 脚本方案。</p>
+
+    <h2>13.6 三语言实现：滑动窗口计数器限流器</h2>
+
+    <h3>Python（redis-py，register_script）</h3>
+<pre><code class="language-python">import time
+import redis
+
+r = redis.Redis(decode_responses=True)
+
+SLIDING_WINDOW_LUA = """
+local current_window = math.floor(tonumber(ARGV[1]) / tonumber(ARGV[2]))
+local previous_window = current_window - 1
+local elapsed_ratio = (tonumber(ARGV[1]) % tonumber(ARGV[2])) / tonumber(ARGV[2])
+local current_key = KEYS[1] .. ':' .. current_window
+local previous_key = KEYS[1] .. ':' .. previous_window
+local current_count = tonumber(redis.call('GET', current_key) or '0')
+local previous_count = tonumber(redis.call('GET', previous_key) or '0')
+local estimated = previous_count * (1 - elapsed_ratio) + current_count
+if estimated >= tonumber(ARGV[3]) then
+    return 0
+end
+redis.call('INCR', current_key)
+redis.call('EXPIRE', current_key, tonumber(ARGV[2]) * 2)
+return 1
+"""
+rate_limit = r.register_script(SLIDING_WINDOW_LUA)
+
+def is_allowed(identifier: str, limit: int = 100, window: int = 60) -> bool:
+    result = rate_limit(keys=[f"ratelimit:{identifier}"], args=[time.time(), window, limit])
+    return bool(result)
+</code></pre>
+
+    <h3>Java（Jedis）</h3>
+<pre><code class="language-java">public boolean isAllowed(UnifiedJedis jedis, String identifier, int limit, int windowSeconds) {
+    String lua = """
+        local current_window = math.floor(tonumber(ARGV[1]) / tonumber(ARGV[2]))
+        local previous_window = current_window - 1
+        local elapsed_ratio = (tonumber(ARGV[1]) % tonumber(ARGV[2])) / tonumber(ARGV[2])
+        local current_key = KEYS[1] .. ':' .. current_window
+        local previous_key = KEYS[1] .. ':' .. previous_window
+        local current_count = tonumber(redis.call('GET', current_key) or '0')
+        local previous_count = tonumber(redis.call('GET', previous_key) or '0')
+        local estimated = previous_count * (1 - elapsed_ratio) + current_count
+        if estimated >= tonumber(ARGV[3]) then return 0 end
+        redis.call('INCR', current_key)
+        redis.call('EXPIRE', current_key, tonumber(ARGV[2]) * 2)
+        return 1
+        """;
+    Object result = jedis.eval(
+        lua,
+        List.of("ratelimit:" + identifier),
+        List.of(String.valueOf(System.currentTimeMillis() / 1000.0), String.valueOf(windowSeconds), String.valueOf(limit))
+    );
+    return Long.valueOf(1).equals(result);
+}
+</code></pre>
+
+    <h3>TypeScript（ioredis + Hono.js 中间件，最贴近实际业务场景）</h3>
+<pre><code class="language-typescript">import { Redis } from "ioredis";
+
+const redis = new Redis();
+
+const SLIDING_WINDOW_LUA = `
+local current_window = math.floor(tonumber(ARGV[1]) / tonumber(ARGV[2]))
+local previous_window = current_window - 1
+local elapsed_ratio = (tonumber(ARGV[1]) % tonumber(ARGV[2])) / tonumber(ARGV[2])
+local current_key = KEYS[1] .. ':' .. current_window
+local previous_key = KEYS[1] .. ':' .. previous_window
+local current_count = tonumber(redis.call('GET', current_key) or '0')
+local previous_count = tonumber(redis.call('GET', previous_key) or '0')
+local estimated = previous_count * (1 - elapsed_ratio) + current_count
+if estimated >= tonumber(ARGV[3]) then return 0 end
+redis.call('INCR', current_key)
+redis.call('EXPIRE', current_key, tonumber(ARGV[2]) * 2)
+return 1
+`;
+
+redis.defineCommand("slidingWindowLimit", { numberOfKeys: 1, lua: SLIDING_WINDOW_LUA });
+
+export async function isAllowed(identifier: string, limit = 100, window = 60): Promise&lt;boolean&gt; {
+  // @ts-expect-error ioredis 动态注入
+  const result = await redis.slidingWindowLimit(`ratelimit:${identifier}`, Date.now() / 1000, window, limit);
+  return result === 1;
+}
+</code></pre>
+
+<pre><code class="language-typescript">// Hono.js 限流中间件
+import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
+
+function rateLimiter(limit = 100, window = 60): MiddlewareHandler {
+  return async (c, next) => {
+    const identifier = c.req.header("x-api-key") ?? c.req.header("cf-connecting-ip") ?? "anonymous";
+    const allowed = await isAllowed(identifier, limit, window);
+    if (!allowed) {
+      return c.json({ error: "Too Many Requests" }, 429);
+    }
+    await next();
+  };
+}
+
+const app = new Hono();
+app.use("/api/*", rateLimiter(100, 60));
+app.get("/api/hello", (c) => c.json({ message: "ok" }));
+
+export default app;
+</code></pre>
+
+    <h2>13.7 分布式场景下的注意事项</h2>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    G1["网关实例 1"] --> R[("共享 Redis<br/>全局计数")]
+    G2["网关实例 2"] --> R
+    G3["网关实例 N"] --> R
+    R -->|"全局限流决策"| G1
+    R -->|"全局限流决策"| G2
+    R -->|"全局限流决策"| G3
+      </div>
+      <figcaption>多个网关实例必须共享同一个 Redis，才能实现真正的全局限流</figcaption>
+    </figure>
+
+    <ul>
+      <li><strong>多个 API 网关实例共享同一个 Redis</strong> 才能实现全局限流；如果每个网关实例自己在内存里计数，只能做到"单机限流"，全局限额会被实例数放大。</li>
+      <li><strong>限流 key 的设计要考虑 Redis Cluster</strong>：如果限流 key 是 <code>ratelimit:&lt;user_id&gt;:&lt;window&gt;</code>，在 Cluster 下会天然按 <code>user_id</code> 哈希分散到不同分片，这通常是期望的行为（不同用户的限流互不影响，天然可以水平扩展）。</li>
+      <li><strong>限流不应该成为新的单点故障</strong>：如果 Redis 短暂不可用，限流中间件要有明确的降级策略——是"直接放行"（fail-open，优先保证可用性）还是"直接拒绝"（fail-closed，优先保证限流语义不被绕过），需要根据业务场景权衡，一般对外 API 网关更倾向 fail-open。</li>
+    </ul>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书没有专门讲限流，但第 6 章的计数信号量、第 2 章的清理循环，在设计思路上和限流算法一脉相承——都是"用 Redis 的原子操作在极短时间内做出允许/拒绝的判断"。今天的限流实践比原书年代成熟得多：固定窗口简单但有边界突发问题，滑动窗口日志精确但耗内存，滑动窗口计数器是工程上最常见的折中方案，令牌桶适合允许突发流量的场景，而 <code>redis-cell</code> 模块的 GCRA 算法则是"不想自己维护 Lua 脚本"时的现成答案。</p>
+    </div>
+
+    <nav class="pagenav">
+      <a href="ch12.html"><span class="dir">上一章</span>第 12 章 安全与访问控制</a>
+      <a href="ch14.html"><span class="dir">下一章</span>第 14 章 可观测性与生产排障</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

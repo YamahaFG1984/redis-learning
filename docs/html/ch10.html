@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 10 章 扩展 Redis — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 10 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 10 章 扩展 Redis</h1>
+    <blockquote><p>对应原书第 10 章 "Scaling Redis"。<strong>重要背景</strong>：本书写于 2013 年，<strong>Redis Cluster 直到 Redis 3.0（2015 年）才正式发布</strong>，所以这一整章教的是"官方分片方案出现之前，工程师如何手工搭建分片系统"。今天这一章最大的价值是理解 Redis Cluster 到底自动化了哪些原本要手写的工作——本文会逐节对照。</p></blockquote>
+
+    <h2>10.1 扩展读</h2>
+    <p><strong>分片之前先做的检查清单</strong>（原书列的，至今适用）：紧凑结构的阈值没设太大（第 9 章）、用对了数据结构（比如该用 ZSET 就别整个 HASH 拉回来客户端排序）、大对象考虑压缩、用了连接池和 pipeline。</p>
+
+    <h3>只读从库</h3>
+    <p>配置 <code>slaveof</code>/<code>SLAVEOF</code>（现代命令名是 <code>REPLICAOF</code>，见第 4 章），把读流量分散到从库。原书提醒<strong>重连从库会丢弃它原有的全部数据</strong>，以及<strong>默认从库拒绝写入</strong>。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+    Client["客户端"] -->|"写请求"| Primary[("主库 Primary<br/>处理全部写入")]
+    Client -->|"读请求（分散/轮询）"| R1[("只读从库 1")]
+    Client -->|"读请求"| R2[("只读从库 2")]
+    Client -->|"读请求"| R3[("只读从库 N")]
+    Primary -->|"复制流<br/>PSYNC 全量+增量同步"| R1
+    Primary -->|"复制流"| R2
+    Primary -->|"复制流"| R3
+      </div>
+      <figcaption>读扩展的基本形态：一个主库承担全部写入，多个只读从库分担读流量</figcaption>
+    </figure>
+
+    <h3>从库重连的带宽问题与两种缓解方案</h3>
+    <p>多个从库同时重连会共享同一份快照传输（高效），但同时给多个从库推送快照可能打满带宽，导致延迟飙升甚至连累其他已连接的从库掉线。原书给的两个方案：</p>
+    <ol>
+      <li><strong>复制树</strong>：主库→若干中间从库→更多叶子从库，用于跨机房/跨广域网复制（原书图示：1 主 → 3 中间从库 → 9 叶子从库）。代价是拓扑复杂化，故障切换更麻烦。</li>
+      <li><strong>压缩隧道</strong>：用带压缩的 SSH 隧道传输复制流量（原书举了一个真实例子：21Mbps 降到 1.8Mbps）。</li>
+    </ol>
+    <p><strong>现代变化</strong>：Redis 2.8 引入的 <strong>PSYNC 部分重同步</strong>（第 4 章已详述）大幅缓解了"重连就要全量重传"这个根本问题；<strong>无盘复制（<code>repl-diskless-sync</code>）</strong> 减少了大数据集下的额外磁盘 IO。原书这两个手工缓解方案在今天依然有效（尤其是跨地域场景），但优先级应该降低——先确认 PSYNC/无盘复制配置正确，再考虑复制树或压缩隧道这类更复杂的手段。</p>
+
+    <h3>Redis Sentinel</h3>
+    <p>原书这里介绍 Sentinel 的监控机制（PUBLISH/SUBSCRIBE + PING 探测健康、多个 Sentinel 独立发现彼此和从库、故障时选举一个 Sentinel 主导切换）。<strong>这一段和第 4 章一样，写的是 Sentinel 刚成熟时的样子</strong>——今天 Sentinel 是生产级高可用的标准组件，配置文档齐全，云托管 Redis（AWS ElastiCache、阿里云 Redis 等）大多在底层用等价机制自动化了这部分工作，用户很多时候不需要自己运维 Sentinel 集群。</p>
+
+    <h2>10.2 扩展写和内存容量</h2>
+
+    <h3>预分片（Presharding）的理念</h3>
+    <p>因为分片数一旦定下来很难改（没有实时重分片能力），原书建议<strong>按未来增长预估提前多分几片</strong>——比如预计每 6 个月写入量翻 4 倍，就预先分 256 片覆盖大约 2 年的增长。<strong>这正是 Redis Cluster 用固定 16384 个哈希槽解决的问题</strong>：槽数固定不变，但槽可以在节点间<strong>迁移</strong>，不需要像本章这样"一开始就要猜对分片数量"。</p>
+
+    <h3>10.2.1/10.2.2 手工分片基础设施</h3>
+    <p>原书这里手写了一整套分片基础设施：</p>
+    <ul>
+      <li><code>get_redis_connection()</code>/<code>get_sharded_connection()</code>：从一个专门的"配置 Redis"里读 JSON 编码的连接信息（<code>config:redis:&lt;component&gt;:&lt;shard&gt;</code>），解析出目标分片的连接对象。</li>
+      <li><code>shard_key()</code>：数字 key 用区间分片（<code>int(key) // shard_size</code>），非数字 key 用 <code>CRC32(key) % shards</code> 哈希分片——和第 9 章的分片 HASH 是同一个函数。</li>
+      <li><code>sharded_connection()</code> 装饰器：自动把"key 参数"解析成对应分片的连接，注入被装饰函数。</li>
+    </ul>
+
+    <h3>KeyShardedConnection 与 KeyDataShardedConnection</h3>
+    <p>原书封装了两个"字典下标风格"的辅助类：</p>
+    <ul>
+      <li><code>KeyShardedConnection</code>：<code>conn[key]</code> 直接返回该 key 所在分片的连接——用于<strong>只按单个 key 分片</strong>的场景（比如按用户 ID 分片的时间线）。</li>
+      <li><code>KeyDataShardedConnection</code>：<code>conn[id1, id2]</code> 把两个 ID <strong>排序后拼接</strong>成分片 key，保证"关注关系"这种需要双方数据都落在同一分片的场景，两边路由到同一台机器——这是手工版本的"哈希标签（hash tag）"。</li>
+    </ul>
+    <p><strong>这正是 Redis Cluster 的 <code>{hash tag}</code> 语法要解决的问题</strong>：Cluster 里你只需要把 key 写成 <code>followers:{1000}</code> 和 <code>following:{1000}</code>，大括号里的部分决定哈希槽，Redis 会自动保证它们落在同一个槽（同一个节点）——不需要像本章这样手写一个专门的类来"排序拼接两个 ID"。</p>
+
+    <h2>10.3 扩展复杂查询</h2>
+
+    <h3>10.3.1 扩展搜索查询量：直接复用只读从库</h3>
+    <p>第 7 章的搜索引擎用 <code>SINTERSTORE</code>/<code>ZINTERSTORE</code> 这类命令做交并集运算，<strong>这些命令本质是写命令</strong>（会把结果写入一个新 key），默认在只读从库上会报错。原书的解决办法很直接：把从库的 <code>slave-read-only</code> 配置成 <code>no</code>，允许它执行这些"写入缓存结果"的搜索命令。<strong>代价</strong>：缓存的搜索结果只存在于执行查询的那个从库上，分页请求需要"粘性路由"（同一个用户的后续请求路由到同一台从库）才能复用缓存。</p>
+
+    <h3>10.3.2 扩展搜索索引规模：手工分片 + 客户端合并分页</h3>
+    <p>这是全章技术含量最高的部分。核心难题：<strong>跨分片分页</strong>——你不知道排名第 91~100 的结果具体落在哪个分片，所以必须从<strong>每个分片</strong>都取回前 100 条，再在客户端合并重新排序，才能正确返回某一页。</p>
+    <p>原书给出两套实现，一套基于 SORT（<code>search_get_values</code>→<code>get_shard_results</code>→<code>search_shards</code>，用 <code>Decimal</code> 类型统一处理数字/字符串排序键），一套基于 ZSET（<code>search_get_zset_values</code>→<code>search_shards_zset</code>，因为分数已经是数字，合并更简单）。作者坦诚地说：分片数越多，每次查询需要拉取合并的数据量越大，<strong>到某个规模就应该考虑换成专业搜索系统</strong>（Lucene/Solr/Elasticsearch/Amazon CloudSearch）而不是继续手工优化合并逻辑。</p>
+    <p><strong>现代视角</strong>：如果你的搜索需求已经复杂到需要跨分片合并分页，今天几乎不会继续走这条路——<strong>直接上 RediSearch（Redis Stack 自带跨分片查询能力）或 Elasticsearch/OpenSearch</strong>，这正是原书作者自己给出的建议，十年后依然成立，只是"专业搜索系统"这个选项现在也包括了 RediSearch 这种就长在 Redis 里的方案。</p>
+
+    <h3>10.3.3 扩展社交网络：时间线按 key 分片，关注关系按数据对分片</h3>
+    <ul>
+      <li><strong>时间线</strong>（<code>home:</code>/<code>profile:</code>）：因为单条时间线数据量有限（≤1000/2000 条），不需要拆分单条时间线内部，只需要<strong>把不同用户的时间线 key 分散到不同分片</strong>——用前面的 <code>KeyShardedConnection</code>。</li>
+      <li><strong>关注关系</strong>（<code>following:</code>/<code>followers:</code>）：必须让关系的两端落在<strong>同一分片</strong>，才能避免"关注"操作要连两个不同分片的连接——用 <code>KeyDataShardedConnection</code>（排序后拼接两个用户 ID）。</li>
+      <li><strong><code>sharded_zrangebyscore()</code></strong>：因为粉丝列表是按<strong>时间戳</strong>排序（而不是任意排名/偏移量），跨分片分页可以直接从"上次看到的分数"继续往下查，<strong>不需要</strong>像搜索索引那样每次都从每个分片的第 0 条重新拉取——原书明确点出这是"按分数分页"比"按排名/偏移量分页"简单得多的地方。</li>
+      <li><strong><code>syndicate_status()</code> 的分片版本</strong>：按目标时间线所在的分片分组，同一分片内的多个 <code>ZADD</code>/<code>ZREMRANGEBYRANK</code> 打包进一个 pipeline，减少连接数和往返次数；作者坦言这个版本可能比非分片版本"更慢"，但"这是扩展到多机所必须付出的代价"。</li>
+    </ul>
+
+    <h2>现代替代：直接使用 Redis Cluster</h2>
+    <p>原书整章教的"presharding + CRC32 取模 + JSON 配置存储发现分片 + 客户端手工路由 + ID 对排序拼接做协同定位"，在今天绝大多数场景下应该被 <strong>Redis Cluster</strong> 取代：</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TB
+    subgraph Manual["原书手工分片方案（2013 年）"]
+        MC["客户端"] --> MCfg["读取 config:redis:组件:分片<br/>JSON 分片配置（存在专门的配置 Redis 里）"]
+        MCfg --> MRoute["shard_key()<br/>数字 key: int(key) // shard_size<br/>非数字 key: CRC32(key) % shards"]
+        MRoute --> MShards["固定数量的 Redis 实例<br/>分片数一旦定下很难改，改动即破坏性变更"]
+        MPair["KeyDataShardedConnection<br/>两个 ID 排序后拼接"] --> MShards
+    end
+    subgraph Cluster["Redis Cluster（3.0+，内置）"]
+        CC["客户端（集群感知）"] --> CRoute["CRC16(key) mod 16384<br/>定位哈希槽"]
+        CRoute --> CSlots["16384 个固定哈希槽<br/>分布在多个 master 节点<br/>槽可在线迁移，扩缩容无需预先猜分片数"]
+        CTag["{hash tag} 语法<br/>key1{uid} 与 key2{uid}"] --> CRoute
+    end
+      </div>
+      <figcaption>原书手工分片方案与 Redis Cluster 内置哈希槽模型的对照：Cluster 把配置发现、路由计算、协同定位都变成了内置能力</figcaption>
+    </figure>
+
+    <table>
+      <thead>
+        <tr><th>原书手工方案</th><th>Redis Cluster 对应能力</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>shard_key()</code>（CRC32 % shards）</td><td>固定 16384 个哈希槽，<code>CRC16(key) mod 16384</code></td></tr>
+        <tr><td>分片数固定、不能重分片</td><td>槽可以在节点间<strong>在线迁移</strong>，扩缩容不需要预先猜分片数</td></tr>
+        <tr><td><code>config:redis:*</code> 手工发现分片连接</td><td>集群总线（cluster bus）+ <code>CLUSTER SLOTS</code>/<code>CLUSTER SHARDS</code>，客户端自动发现拓扑</td></tr>
+        <tr><td><code>KeyDataShardedConnection</code> 排序拼接两个 ID</td><td><code>{hash tag}</code> 语法：<code>key1{tag}</code> 和 <code>key2{tag}</code> 自动路由到同一个槽</td></tr>
+        <tr><td>客户端手工向每个分片发请求再合并</td><td>跨槽的多 key 操作依然不被允许（原理相通），但单 key/hash-tag 内操作对客户端透明</td></tr>
+        <tr><td>Sentinel（单独运维）做主库故障切换</td><td>Cluster 内置副本，槽的主节点故障后自动从副本提升</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>什么时候还需要走本章的手工路线</strong>：如果你的场景需要"跨分片做复杂聚合排序"（比如 10.3.2 节的搜索场景），即使上了 Redis Cluster，多 key 跨槽操作依然会被拒绝——这种情况下客户端依然需要自己实现"分别查询、本地合并"的逻辑，本章教的合并/分页技巧完全没有过时，只是"分片路由"这一层可以交给 Cluster，不用自己维护 JSON 配置。</p>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书总结：只读从库、可写查询从库（<code>slave-read-only no</code>）、以及手工分片三件套是 2013 年扩展 Redis 的全部武器库。<strong>现代读者应该把"手工分片"这部分理解为"Redis Cluster 出现之前的历史必然"</strong>——理解它能帮你理解 Cluster 解决了什么问题、什么时候 Cluster 也无能为力（跨槽多 key 聚合）需要你自己在应用层继续做本章教的"分别查询+合并"。</p>
+    </div>
+
+    <h2>附：本章 Listing 对照表</h2>
+    <table>
+      <thead>
+        <tr><th>Listing</th><th>内容</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>10.1–10.4</td><td>分片连接管理装饰器、分片唯一计数</td></tr>
+        <tr><td>10.5–10.9</td><td>SORT/ZSET 两种跨分片搜索与合并分页</td></tr>
+        <tr><td>10.10–10.11</td><td><code>KeyShardedConnection</code>：按 key 分片的时间线</td></tr>
+        <tr><td>10.12–10.15</td><td><code>KeyDataShardedConnection</code>：按 ID 对分片的关注关系，分片状态扇出</td></tr>
+      </tbody>
+    </table>
+
+    <nav class="pagenav">
+      <a href="ch09.html"><span class="dir">上一章</span>第 9 章 降低内存占用</a>
+      <a href="ch11.html"><span class="dir">下一章</span>第 11 章 用 Lua 给 Redis 写脚本</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 14 章（补充）可观测性与生产排障 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 14 章 · 补充</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 14 章（补充）可观测性与生产排障</h1>
+    <blockquote><p>本章是原书没有覆盖的内容。原书第 4 章讲了"怎么用 <code>redis-benchmark</code> 对比吞吐率"，但完全没有涉及<strong>上线之后怎么持续监控、怎么在出问题时快速定位</strong>——这在今天是任何生产 Redis 部署都绕不开的一课。本章补上这块内容。</p></blockquote>
+
+    <h2>14.1 内置诊断命令</h2>
+
+    <h3>慢查询日志 SLOWLOG</h3>
+
+<pre><code class="language-bash">CONFIG SET slowlog-log-slower-than 10000   # 单位微秒，超过 10ms 记录
+CONFIG SET slowlog-max-len 1000
+SLOWLOG GET 10     # 查看最近 10 条慢查询
+SLOWLOG RESET
+</code></pre>
+
+    <p><code>SLOWLOG</code> 记录的是<strong>执行阶段</strong>的耗时，不包括排队等待时间——如果整体延迟很高但 <code>SLOWLOG</code> 里都是正常的，问题很可能出在网络排队/客户端侧，而不是 Redis 命令本身太慢。这是排查"应用感知延迟高，但 SLOWLOG 看着正常"这类问题时最容易被忽视的一点。</p>
+
+    <h3>延迟监控 LATENCY</h3>
+
+<pre><code class="language-bash">CONFIG SET latency-monitor-threshold 100   # 单位毫秒
+LATENCY HISTORY event         # 查看某类延迟事件的历史（如 command、fork、fast-command）
+LATENCY LATEST                # 所有类别的最新一次延迟事件
+LATENCY DOCTOR                # Redis 自己给出的诊断建议（文字形式，很实用）
+</code></pre>
+
+    <p><code>LATENCY DOCTOR</code> 是一个经常被忽略但很好用的命令——它会根据当前记录的延迟事件，用自然语言直接告诉你"你的 fork 耗时偏高，可能是数据集太大/AOF 重写太频繁"这类结论，等于内置了一份自动化的排障报告。</p>
+
+    <h3>内存分析</h3>
+
+<pre><code class="language-bash">MEMORY USAGE mykey             # 单个 key 占用的字节数
+MEMORY STATS                   # 整体内存分布（dataset、overhead、fragmentation 等）
+MEMORY DOCTOR                  # 类似 LATENCY DOCTOR，给内存问题的自动诊断
+redis-cli --bigkeys            # 扫描找出各类型里最大的 key（生产环境建议在从库上跑）
+redis-cli --memkeys            # 按估算内存占用排序找大 key（较新版本 redis-cli 支持）
+</code></pre>
+
+    <p><strong><code>--bigkeys</code>/<code>--memkeys</code> 的重要提醒</strong>：这两个工具本质是全量扫描（基于 <code>SCAN</code>，比原书年代直接 <code>KEYS *</code> 安全，但依然会给 Redis 带来额外负载），<strong>生产环境建议在只读从库上跑，而不是主库</strong>，且尽量避开业务高峰期。</p>
+
+    <h3>客户端连接诊断</h3>
+
+<pre><code class="language-bash">CLIENT LIST                    # 查看所有连接，包括每个连接的空闲时间、正在执行的命令
+CLIENT INFO                    # 当前连接自身的信息
+INFO clients                   # 连接数统计
+</code></pre>
+
+    <p>原书第 4 章的"25%~30% 基准吞吐 = 每次都在新建连接"这条经验法则依然成立，<code>CLIENT LIST</code> 是验证这个猜测最直接的手段——如果看到大量连接的 <code>age</code> 都是 0 或很小，说明客户端确实没有复用连接。</p>
+
+    <h2>14.2 内存淘汰策略：maxmemory-policy</h2>
+
+    <p>原书完全没有讨论"内存满了怎么办"，但这是生产环境几乎必然会遇到的问题。Redis 提供 8 种淘汰策略：</p>
+
+    <table>
+      <thead>
+        <tr><th>策略</th><th>行为</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>noeviction</code>（默认）</td><td>内存满后拒绝写入，返回错误</td></tr>
+        <tr><td><code>allkeys-lru</code></td><td>所有 key 里淘汰最近最少使用的</td></tr>
+        <tr><td><code>allkeys-lfu</code>（4.0+）</td><td>所有 key 里淘汰访问频率最低的</td></tr>
+        <tr><td><code>allkeys-random</code></td><td>所有 key 里随机淘汰</td></tr>
+        <tr><td><code>volatile-lru</code></td><td>只在设置了 TTL 的 key 里淘汰 LRU</td></tr>
+        <tr><td><code>volatile-lfu</code></td><td>只在设置了 TTL 的 key 里淘汰 LFU</td></tr>
+        <tr><td><code>volatile-random</code></td><td>只在设置了 TTL 的 key 里随机淘汰</td></tr>
+        <tr><td><code>volatile-ttl</code></td><td>优先淘汰剩余 TTL 最短的 key</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>如何选择</strong>：如果 Redis 是纯缓存（数据丢了可以从数据库重新加载），用 <code>allkeys-lru</code> 或 <code>allkeys-lfu</code>（LFU 更适合"有些 key 被频繁访问、有些几乎不被访问"这种长尾分布场景，比如热点商品缓存）。如果 Redis 里既有缓存数据又有不能丢的业务数据（如队列、计数器），<strong>必须用 <code>volatile-*</code> 策略，并且给可以被淘汰的 key 显式设置 TTL，给不能丢的 key 不设置 TTL</strong>——<code>noeviction</code> 策略下，一旦内存打满，所有写命令（包括看似无关的业务写入）都会开始报错，这是很多生产事故的根源，排查时第一时间应该检查 <code>INFO memory</code> 里的 <code>used_memory</code> 是否逼近 <code>maxmemory</code>。</p>
+
+    <h2>14.3 指标采集：Prometheus + Grafana</h2>
+
+    <p>原书第 5 章推荐 Graphite 做统计可视化，今天最主流的组合是 <strong>Redis Exporter + Prometheus + Grafana</strong>：</p>
+
+<pre><code class="language-bash">docker run -d --name redis-exporter -p 9121:9121 \
+  oliver006/redis_exporter --redis.addr=redis://redis:6379
+</code></pre>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+    Redis[("Redis 实例")] -->|"INFO / 指标数据"| Exporter["redis_exporter<br/>:9121"]
+    Exporter -->|"定期抓取 /metrics"| Prom["Prometheus<br/>存储时间序列"]
+    Prom -->|"PromQL 查询"| Grafana["Grafana<br/>仪表盘渲染"]
+    RI["RedisInsight<br/>(GUI 工具)"] -.->|"直连，临时性检查"| Redis
+      </div>
+      <figcaption>可观测性技术栈：redis_exporter 采集指标供 Prometheus/Grafana 做长期趋势监控，RedisInsight 是独立于该链路之外的直连工具，用于即席检查</figcaption>
+    </figure>
+
+    <p>Prometheus 配置抓取目标后，Grafana 直接导入官方的 Redis Dashboard（Grafana.com 上有现成的公开面板模板），核心要盯的指标：</p>
+
+    <ul>
+      <li><code>redis_connected_clients</code> —— 连接数是否异常增长（连接泄漏的信号）。</li>
+      <li><code>redis_memory_used_bytes</code> vs <code>redis_memory_max_bytes</code> —— 内存逼近上限的预警线。</li>
+      <li><code>redis_commands_processed_total</code>（配合 rate() 看 QPS 趋势）。</li>
+      <li><code>redis_keyspace_hits_total</code> / <code>redis_keyspace_misses_total</code> —— 缓存命中率，命中率骤降往往意味着缓存被绕过或者刚发生过大规模淘汰。</li>
+      <li><code>redis_rdb_bgsave_in_progress</code> / <code>redis_aof_rewrite_in_progress</code> —— 持久化操作是否在进行，配合应用层延迟毛刺做关联分析（回想第 4 章讲的 fork 停顿问题）。</li>
+      <li><code>redis_replication_lag</code> —— 主从复制延迟，读从库的场景要特别关注这个指标，延迟过高意味着从库读到的是旧数据。</li>
+    </ul>
+
+    <h2>14.4 Redis 自带的可视化工具：RedisInsight</h2>
+
+    <p>Redis 官方提供免费的图形化管理工具 <strong>RedisInsight</strong>，可以直接连接实例查看：key 空间分析（按前缀统计内存占用分布，比手写脚本扫描方便很多）、慢查询日志可视化、内存分析、Profiler（实时看命令流）、以及 CLI。对于原书第 9 章讲的"哪些 key 该分片/该压缩"，RedisInsight 的内存分析视图能直接可视化出"哪类 key 前缀占用了最多内存"，比手写扫描脚本效率高得多。</p>
+
+    <h2>14.5 三语言下的健康检查与基础指标暴露</h2>
+
+    <h3>Python（Django 健康检查端点）</h3>
+
+<pre><code class="language-python"># views.py
+from django.http import JsonResponse
+from django_redis import get_redis_connection
+
+def health_check(request):
+    try:
+        conn = get_redis_connection("default")
+        info = conn.info()
+        return JsonResponse({
+            "status": "ok",
+            "connected_clients": info["connected_clients"],
+            "used_memory_human": info["used_memory_human"],
+            "hit_rate": info["keyspace_hits"] / max(1, info["keyspace_hits"] + info["keyspace_misses"]),
+        })
+    except Exception as e:
+        return JsonResponse({"status": "error", "detail": str(e)}, status=503)
+</code></pre>
+
+    <h3>Java（Jedis，暴露关键 INFO 字段）</h3>
+
+<pre><code class="language-java">public Map&lt;String, String&gt; healthCheck(UnifiedJedis jedis) {
+    String info = jedis.info();
+    Map&lt;String, String&gt; stats = new HashMap&lt;&gt;();
+    for (String line : info.split("\r\n")) {
+        if (line.startsWith("connected_clients:") || line.startsWith("used_memory_human:")) {
+            String[] kv = line.split(":", 2);
+            stats.put(kv[0], kv[1]);
+        }
+    }
+    return stats;
+}
+</code></pre>
+
+    <h3>TypeScript（Hono.js 健康检查端点）</h3>
+
+<pre><code class="language-typescript">import { Hono } from "hono";
+import { Redis } from "ioredis";
+
+const redis = new Redis();
+const app = new Hono();
+
+app.get("/health/redis", async (c) => {
+  try {
+    const info = await redis.info();
+    const parsed = Object.fromEntries(
+      info.split("\r\n").filter((l) => l.includes(":")).map((l) => l.split(":") as [string, string])
+    );
+    return c.json({
+      status: "ok",
+      connectedClients: parsed["connected_clients"],
+      usedMemory: parsed["used_memory_human"],
+    });
+  } catch (e) {
+    return c.json({ status: "error", detail: String(e) }, 503);
+  }
+});
+
+export default app;
+</code></pre>
+
+    <h2>14.6 生产排障速查表</h2>
+
+    <table>
+      <thead>
+        <tr><th>现象</th><th>优先检查</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>应用延迟高，SLOWLOG 正常</td><td>网络排队/客户端连接池配置；<code>CLIENT LIST</code> 查连接数</td></tr>
+        <tr><td>内存持续增长</td><td><code>MEMORY STATS</code>/<code>--bigkeys</code>；确认 <code>maxmemory-policy</code> 和 TTL 设置是否合理</td></tr>
+        <tr><td>写入突然报错 OOM</td><td><code>INFO memory</code> 检查是否逼近 <code>maxmemory</code>；策略是否为 <code>noeviction</code></td></tr>
+        <tr><td>周期性延迟毛刺</td><td>关联 <code>redis_rdb_bgsave_in_progress</code>/AOF 重写时间点（第 4 章 fork 开销）</td></tr>
+        <tr><td>命中率骤降</td><td>检查是否刚发生大规模淘汰，或缓存 key 设计变更导致穿透</td></tr>
+        <tr><td>从库读到旧数据</td><td><code>INFO replication</code> 查 <code>master_repl_offset</code> 与从库偏移量的差距</td></tr>
+        <tr><td>连接数异常增长</td><td>排查是否有客户端连接泄漏（未正确关闭/复用连接）</td></tr>
+      </tbody>
+    </table>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Start(["发现问题"]) --> S1["应用延迟高<br/>但 SLOWLOG 正常"]
+    Start --> S2["内存持续增长"]
+    Start --> S3["写入报错 OOM"]
+    Start --> S4["周期性延迟毛刺"]
+    Start --> S5["命中率骤降"]
+    Start --> S6["从库读到旧数据"]
+    Start --> S7["连接数异常增长"]
+
+    S1 --> A1["检查网络排队/连接池配置<br/>CLIENT LIST 查连接数"]
+    S2 --> A2["MEMORY STATS / --bigkeys<br/>确认 maxmemory-policy 与 TTL 设置"]
+    S3 --> A3["INFO memory 检查是否逼近 maxmemory<br/>确认策略是否为 noeviction"]
+    S4 --> A4["关联 bgsave/AOF 重写时间点<br/>(fork 开销)"]
+    S5 --> A5["检查是否刚发生大规模淘汰<br/>或缓存 key 设计变更导致穿透"]
+    S6 --> A6["INFO replication 查偏移量差距"]
+    S7 --> A7["排查客户端连接泄漏<br/>(未正确关闭/复用连接)"]
+      </div>
+      <figcaption>生产排障速查表的可视化：从症状快速定位到优先检查项</figcaption>
+    </figure>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书对"上线后怎么办"几乎是空白——这符合当时的技术生态（Prometheus 2015 年才发布，Grafana 更晚才成熟）。今天一套完整的 Redis 生产实践必须包含可观测性这一环：内置的 <code>SLOWLOG</code>/<code>LATENCY</code>/<code>MEMORY</code> 系列命令负责"现场排障"，Redis Exporter + Prometheus + Grafana 负责"长期趋势监控和告警"，RedisInsight 负责"图形化探索"。这三层工具配合，才能把原书第 4 章那种"靠经验法则手工排查"的方式，升级成有数据支撑的系统化运维。</p>
+    </div>
+
+    <nav class="pagenav">
+      <a href="ch13.html"><span class="dir">上一章</span>第 13 章 用 Redis 做限流</a>
+      <a href="ch15.html"><span class="dir">下一章</span>第 15 章 Redis 与 AI 应用</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

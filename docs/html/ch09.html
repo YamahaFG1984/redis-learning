@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章 降低内存占用 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 9 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 9 章 降低内存占用</h1>
+    <blockquote><p>对应原书第 9 章 "Reducing memory use"。作者提到自己曾用本章的三个技巧把内存占用从"三台机器共 70GB+"降到"一台机器 3GB 以内"——降内存不仅省钱，还能缩短快照/AOF 重写/从库同步耗时（第 4 章内容）。</p></blockquote>
+
+    <h2>重要术语更新：ziplist → listpack</h2>
+    <p><strong>这是本章最需要提前说明的一点</strong>：原书用的"ziplist"编码和对应的配置项名字（<code>hash-max-ziplist-entries</code>、<code>list-max-ziplist-entries</code>、<code>zset-max-ziplist-entries</code>）都是 Redis 2.6 时代的名字。<strong>Redis 5.0 引入了新的 listpack 编码，逐步替代了 ziplist 作为 HASH/ZSET/LIST 的紧凑编码格式，配置项也相应改名</strong>：</p>
+
+    <table>
+      <thead>
+        <tr><th>原书（2.6 时代）</th><th>现代 Redis（7.x/8.x）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>hash-max-ziplist-entries</code> / <code>-value</code></td><td><code>hash-max-listpack-entries</code> / <code>-value</code></td></tr>
+        <tr><td><code>zset-max-ziplist-entries</code> / <code>-value</code></td><td><code>zset-max-listpack-entries</code> / <code>-value</code></td></tr>
+        <tr><td><code>list-max-ziplist-size</code></td><td><code>list-max-listpack-size</code></td></tr>
+        <tr><td><code>set-max-intset-entries</code></td><td>不变，SET 的整数紧凑编码依然叫 intset</td></tr>
+      </tbody>
+    </table>
+
+    <p>旧的 <code>*-max-ziplist-*</code> 配置名在现代 Redis 里通常仍作为<strong>别名</strong>保留兼容，但 <code>CONFIG GET</code>/文档里看到的标准名字已经是 <code>listpack</code>。原理和原书讲的完全一样（紧凑的、需要整体解码的序列化表示，用来省掉链表节点指针的开销），只是内部实现和名字换了。</p>
+
+    <p><strong>查看编码的命令也变了</strong>：原书全程用 <code>DEBUG OBJECT key</code>（读 <code>encoding</code> 字段）。<strong>现代推荐用 <code>OBJECT ENCODING key</code></strong>，直接返回编码名字符串（如 <code>listpack</code>、<code>quicklist</code>、<code>intset</code>、<code>hashtable</code>、<code>skiplist</code>），比 <code>DEBUG OBJECT</code> 的输出更简洁，且不需要打开 <code>DEBUG</code> 权限（生产环境很多场景会限制 <code>DEBUG</code> 命令）。</p>
+
+    <h2>9.1 小结构的紧凑编码</h2>
+
+    <h3>listpack 的原理（原书讲的是 ziplist，原理相通）</h3>
+    <p>普通双向链表每个节点要存 prev/next 指针 + 字符串本身（长度前缀+剩余空间+内容+结尾符），对 3 个 3 字符的字符串，原书算出<strong>21 字节的开销对应仅 3 字节的实际数据</strong>。ziplist/listpack 换成"上一条目长度 + 本条目长度 + 内容"连续排列的紧凑格式，开销降到每条约 2 字节。</p>
+    <p><strong>代价</strong>：每次读写都可能需要解码/重新编码整个结构，甚至挪动内存——这不是"免费的午餐"，而是用 CPU 换内存。原书用实测数据说明了这一点：把 <code>list-max-ziplist-entries</code> 故意调到 11 万（远超实际会用的规模）做基准测试，<code>RPOPLPUSH</code> 吞吐从 1 条目时的 5.2 万次/秒，掉到 10 万条目时的 <strong>553 次/秒</strong>——"ziplist 到这个规模已经基本不可用"。</p>
+    <p><strong>作者给出的经验值（至今依然是很好的参考起点）</strong>：紧凑编码的元素数量控制在 <strong>500~2000</strong> 条，单个元素大小控制在 <strong>128 字节以内</strong>；作者本人日常用 1024 条/64 字节作为默认值。</p>
+
+    <h3>intset：SET 的紧凑编码</h3>
+    <p>如果一个 SET 里所有成员都是可以解析成整数的值，且数量不超过 <code>set-max-intset-entries</code>（默认 512），Redis 会用一个有序整数数组存储——好处是<strong>不仅省内存，标准 SET 操作也依然很快</strong>（因为本质是有序数组，不像 ziplist/listpack 解码有额外开销）。</p>
+
+    <h3>不可逆转换的坑</h3>
+    <p>原书用一个实测演示了一个重要的"陷阱"：LIST 一旦因为某个超大元素被转换成非紧凑编码（<code>linkedlist</code>/现代叫 <code>quicklist</code>），<strong>即使后来把那个大元素弹出去，LIST 也不会自动转换回紧凑编码</strong>——这是一个单向的转换过程。这一点在现代 Redis 里依然成立，是排查"内存占用为什么降不下来"时最常被忽视的原因之一。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Small["小型 HASH / LIST / ZSET<br/>元素少、单个元素也小"] --> Check{"数量或大小超过阈值?<br/>如 hash-max-listpack-entries / -value"}
+    Check -- "未超过" --> Listpack["listpack 编码<br/>连续字节数组：长度+内容逐条排列<br/>内存开销低，但读写需整体解码"]
+    Check -- "超过阈值" --> Full["hashtable / skiplist / quicklist 编码<br/>标准指针结构，内存开销更高但访问更快"]
+    Full -.->|"元素被删除、数量回落也不会转回<br/>单向转换，常被忽视的陷阱"| Trap["内存占用降不下来"]
+      </div>
+      <figcaption>紧凑编码（listpack）与标准编码（hashtable/skiplist/quicklist）之间的自动转换是单向的</figcaption>
+    </figure>
+
+    <h2>9.2 分片结构</h2>
+    <p><strong>核心思想</strong>：把一个逻辑上很大的 HASH/SET 拆成很多小的物理 key（<code>&lt;name&gt;:&lt;shard_id&gt;</code>），让每个分片都保持在紧凑编码的阈值以内。</p>
+    <p><strong>分片方式</strong>：数字型 key（如自增 ID）用 <code>int(key) // shard_size</code> 做范围分片，保持相邻 ID 落在同一分片；非数字型 key 用 <code>CRC32(key) % shards</code> 做哈希分片（选 CRC32 是因为它返回普通整数、速度快，"够用就行"，不追求 MD5/SHA1 的密码学强度）。</p>
+    <p><strong>必须保持一致的两个参数</strong>：<code>total_elements</code> 和 <code>shard_size</code> 一旦定下来就不该随便改，否则同一个 key 会被路由到不同分片——如果确实需要调整，需要一次显式的"重分片（resharding）"数据迁移过程。这是理解现代 Redis Cluster 为什么要设计"固定 16384 个哈希槽 + 槽迁移机制"的一个很好的对照——<strong>原书这套手工方案完全没有槽迁移能力，改分片数就是破坏性变更</strong>。</p>
+    <p><strong>ZSET 大多不建议分片</strong>：原书专门用侧栏说明——ZRANGE/ZRANGEBYSCORE/ZRANK/ZCOUNT 这些操作分片后都要查遍所有分片才能给出正确结果，违背了 ZSET 本该有的对数时间复杂度承诺。如果只需要 Top-N/Bottom-N 查询，更好的做法是维护一个<strong>始终裁剪到固定大小的辅助 ZSET</strong>（<code>ZADD</code> + <code>ZREMRANGEBYRANK</code>），这也是第 2 章热度榜单用的同一个模式。</p>
+    <p><strong>LIST 分片被明确推迟</strong>：原书说"不用 Lua 脚本很难做到"，留到第 11 章用 Lua 实现。</p>
+    <p><strong>实测内存收益</strong>（原书给出的具体数字，很有说服力）：</p>
+    <ul>
+      <li>37 万条城市数据的单一 HASH ≈ 44MB；分片（<code>hash-max-ziplist-entries 1024</code>，<code>-value 256</code>）后 ≈ 12MB，<strong>降低 70%</strong>。</li>
+      <li>100 万唯一访客 ID（56 位截断的 UUID）单一 SET ≈ 56MB；分片后 ≈ 9.5MB，<strong>降低 83%</strong>。</li>
+    </ul>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    subgraph Logical["逻辑上的一个大 HASH（如 37 万条城市数据）"]
+        L["city:info"]
+    end
+    Client["客户端请求 key"] --> Route{"key 是数字型?"}
+    Route -- "是" --> Range["区间分片<br/>shard_id = int(key) // shard_size"]
+    Route -- "否" --> Hash["哈希分片<br/>shard_id = CRC32(key) % shards"]
+    Range --> Shard["定位物理分片 key<br/>city:info:shard_id"]
+    Hash --> Shard
+    subgraph Physical["很多小的物理 HASH（各自保持在紧凑编码阈值内）"]
+        S0["city:info:0"]
+        S1["city:info:1"]
+        S2["city:info:2"]
+        Sn["city:info:N"]
+    end
+    Shard --> S0
+    Shard --> S1
+    Shard --> S2
+    Shard --> Sn
+      </div>
+      <figcaption>把一个逻辑大 HASH 拆分成多个物理小 HASH，每个分片都维持在紧凑编码阈值以内</figcaption>
+    </figure>
+
+    <h3>唯一访客计数的位截断技巧</h3>
+    <p>把 128 位 UUID 截断到<strong>前 15 个十六进制字符（56 位）</strong>再转成整数，既能享受 intset 优化，又能通过生日碰撞概率计算证明"足够安全"：日活 &lt;2.5 亿时，每天因碰撞漏计一个用户的概率 ≤1%；日活 &lt;2500 万时，需要连续运行约 <strong>2739 年</strong>才可能漏计一次。这是一个很好的"用概率论量化工程取舍是否可接受"的例子，而不是拍脑袋决定"应该够用了"。</p>
+    <p><strong>现代替代</strong>：如果你只是要做"唯一访客计数"（不需要具体是哪些访客，只要基数），<strong>HyperLogLog（<code>PFADD</code>/<code>PFCOUNT</code>）</strong> 是比手写分片 SET 更省心的官方方案——固定 12KB 内存，误差率 &lt;1%，原书这一节其实是在 HyperLogLog 被移植进 Redis（2.8.9）<strong>之前</strong>写的手工替代方案。如果精确计数比省内存更重要（比如需要知道具体是谁访问过），分片 SET 依然有价值；如果只要一个"大概的数字"，直接用 HyperLogLog。原书自己的侧栏也提到了这个方向的思路（提到了外部的 <code>bitmapist</code> 库，用 Bitmap 而不是 SET 存访客记录）。</p>
+
+    <h2>9.3 打包位和字节</h2>
+    <p>用固定长度的编码把数据直接塞进 Redis STRING（<code>GETRANGE</code>/<code>SETRANGE</code>/<code>GETBIT</code>/<code>SETBIT</code>），这是比"分片 HASH"更进一步的压缩手段：不需要 HASH 的字段名开销，直接按偏移量读写。</p>
+    <p><strong>精度/字节数权衡</strong>（原书给的参考表，至今适用）：1 字节够存全球国家级信息；2 字节够存省/州级；3 字节够存大多数国家的邮编级别；4 字节精度能到经纬度约 2 米。原书选择 2 字节（国家+州/省）存储位置信息。</p>
+    <p><strong>为什么 0 必须留给"无数据"</strong>：Redis STRING 未写入的区域读出来是 null 字节（<code>\0</code>），所以打包方案里每个索引都要 <code>+1</code> 偏移，让"0"始终表示"未找到/未写入"，而不会和"表里第 0 条"混淆——这是一个容易被忽略但很关键的细节。</p>
+    <p><strong>为什么这里的分片理由和 HASH 分片不同</strong>：HASH/SET 分片是为了保持紧凑编码（避免解码开销）；STRING 分片是因为<strong>单个 STRING 硬性上限 512MB</strong>，以及分片能减少内存碎片、控制单 key 大小。原书用一个类 Twitter 规模的例子说明：7.5 亿用户 × 2 字节 &gt; 1.5GB，必须分片到多个 STRING（每片 2^20≈100万用户，约 2MB/片）。</p>
+
+    <h2>现代示例：分片 HASH 与 HyperLogLog 计数（三语言）</h2>
+
+    <p><strong>Python（redis-py）</strong></p>
+<pre><code class="language-python">import zlib
+import redis
+
+r = redis.Redis(decode_responses=True)
+TOTAL_SIZE = 320_000
+SHARD_SIZE = 1024
+
+def shard_key(base: str, key: str, total_elements: int, shard_size: int) -> str:
+    if isinstance(key, int) or key.isdigit():
+        shard_id = int(key) // shard_size
+    else:
+        shards = 2 * total_elements // shard_size
+        shard_id = zlib.crc32(key.encode()) % shards
+    return f"{base}:{shard_id}"
+
+def shard_hset(base: str, key: str, value: str, total_elements: int, shard_size: int):
+    r.hset(shard_key(base, key, total_elements, shard_size), key, value)
+
+def shard_hget(base: str, key: str, total_elements: int, shard_size: int):
+    return r.hget(shard_key(base, key, total_elements, shard_size), key)
+
+# 现代替代：唯一访客计数直接用 HyperLogLog，而不是手工分片 SET
+def count_visit(session_id: str, day: str):
+    r.pfadd(f"unique:{day}", session_id)
+
+def get_unique_count(day: str) -> int:
+    return r.pfcount(f"unique:{day}")
+</code></pre>
+
+    <p><strong>Java（Jedis，HyperLogLog）</strong></p>
+<pre><code class="language-java">public void countVisit(UnifiedJedis jedis, String sessionId, String day) {
+    jedis.pfadd("unique:" + day, sessionId);
+}
+
+public long getUniqueCount(UnifiedJedis jedis, String day) {
+    return jedis.pfcount("unique:" + day);
+}
+</code></pre>
+
+    <p><strong>TypeScript（ioredis，HyperLogLog）</strong></p>
+<pre><code class="language-typescript">export async function countVisit(redis: Redis, sessionId: string, day: string) {
+  await redis.pfadd(`unique:${day}`, sessionId);
+}
+
+export async function getUniqueCount(redis: Redis, day: string): Promise&lt;number&gt; {
+  return redis.pfcount(`unique:${day}`);
+}
+</code></pre>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书三个技巧——紧凑结构编码、分片、位打包——在现代 Redis 里依然是控制内存占用的核心手段，但工具箱更新了：</p>
+      <ul>
+        <li>ziplist 改名 listpack，<code>OBJECT ENCODING</code> 取代 <code>DEBUG OBJECT</code> 查看编码。</li>
+        <li>唯一计数场景优先用 HyperLogLog，不用手写分片 SET + 位截断。</li>
+        <li>ZSET 依然不建议整体分片，Top-N 场景用裁剪 ZSET；范围查询场景可以考虑 RediSearch 的数值索引。</li>
+        <li>手工分片方案（本章 9.2 节）本质上是 Redis Cluster 出现之前的"人肉版哈希槽"——理解它有助于理解第 10 章要讲的 Redis Cluster 到底自动化了哪些工作。</li>
+      </ul>
+    </div>
+
+    <h2>附：本章 Listing 对照表</h2>
+    <table>
+      <thead>
+        <tr><th>Listing</th><th>内容</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>9.1–9.6</td><td>ziplist/intset 配置项与性能实测</td></tr>
+        <tr><td>9.7–9.9</td><td><code>shard_key()</code> 分片 HASH（IP 城市查询）</td></tr>
+        <tr><td>9.10–9.12</td><td>分片 SET 做唯一访客计数（56 位截断 UUID）</td></tr>
+        <tr><td>9.13–9.14</td><td>国家/州省编码表与打包函数</td></tr>
+        <tr><td>9.15–9.18</td><td>分片 STRING 存储与聚合统计</td></tr>
+      </tbody>
+    </table>
+
+    <nav class="pagenav">
+      <a href="ch08.html"><span class="dir">上一章</span>第 8 章 构建一个简单的社交网络</a>
+      <a href="ch10.html"><span class="dir">下一章</span>第 10 章 扩展 Redis</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

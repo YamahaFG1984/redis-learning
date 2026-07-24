@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 章 Redis 命令大全 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 3 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 3 章 Redis 命令大全</h1>
+    <blockquote><p>对应原书第 3 章 "Commands in Redis"。原书说这一章覆盖了"日常使用中 95% 以上"的 Redis 命令；这里在保留原书结构的基础上，把每个命令族更新到当前 Redis 版本，并标注哪些是这些年新增的能力。</p></blockquote>
+
+    <p>原书写作时 Windows 上能下载到的编译版还是 Redis 2.4，书中大量用到 2.6 的新特性，专门开了一个提示框："2.4 和 2.6 的区别"：Lua 脚本、毫秒级过期（PTTL/PEXPIRE/PEXPIREAT）、位运算（BITOP/BITCOUNT）、以及 RPUSH/LPUSH/SADD/SREM/HDEL/ZADD/ZREM 从"只能传一个值"变成"能传多个值"。这个提示放到今天格外有历史感——<strong>现在 Redis 的版本节奏是每年一个大版本，2.x 时代那种"这个命令还不支持多参数"的问题早已不存在</strong>，但它提醒我们：命令的能力边界是随版本演进的，写生产代码前查一下"该命令从哪个版本开始支持这个选项"是好习惯。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Root["Redis 命令"] --> STR["STRING<br/>字符串"]
+    Root --> LIST["LIST<br/>列表"]
+    Root --> SET["SET<br/>集合"]
+    Root --> HASH["HASH<br/>哈希"]
+    Root --> ZSET["ZSET<br/>有序集合"]
+    Root --> PUBSUB["Pub/Sub<br/>发布订阅"]
+    Root --> TX["事务"]
+    Root --> EXP["过期"]
+
+    STR --> STR1["GET / SET"]
+    STR --> STR2["INCR / INCRBY"]
+    STR --> STR3["GETBIT / SETBIT"]
+    STR --> STR4["BITCOUNT / BITOP"]
+
+    LIST --> LIST1["RPUSH / LPUSH"]
+    LIST --> LIST2["RPOP / LPOP"]
+    LIST --> LIST3["LRANGE / LTRIM"]
+    LIST --> LIST4["BLPOP / BRPOP"]
+
+    SET --> SET1["SADD / SREM"]
+    SET --> SET2["SISMEMBER / SCARD"]
+    SET --> SET3["SINTER / SUNION / SDIFF"]
+
+    HASH --> HASH1["HSET / HGET"]
+    HASH --> HASH2["HMGET / HDEL"]
+    HASH --> HASH3["HINCRBY"]
+
+    ZSET --> ZSET1["ZADD / ZREM"]
+    ZSET --> ZSET2["ZRANGE / ZRANGEBYSCORE"]
+    ZSET --> ZSET3["ZRANK / ZINCRBY"]
+    ZSET --> ZSET4["ZINTERSTORE / ZUNIONSTORE"]
+
+    PUBSUB --> PS1["SUBSCRIBE / PUBLISH"]
+    PUBSUB --> PS2["PSUBSCRIBE"]
+
+    TX --> TX1["MULTI / EXEC"]
+    TX --> TX2["WATCH"]
+
+    EXP --> EXP1["EXPIRE / TTL"]
+    EXP --> EXP2["PERSIST"]
+      </div>
+      <figcaption>Redis 命令族的鸟瞰图：本章按数据结构分类逐一介绍这些命令</figcaption>
+    </figure>
+
+    <h2>3.1 字符串（STRING）</h2>
+
+    <table>
+      <thead><tr><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>INCR / DECR</td><td>±1</td></tr>
+        <tr><td>INCRBY / DECRBY</td><td>±N（整数）</td></tr>
+        <tr><td>INCRBYFLOAT</td><td>±N（浮点，2.6+）</td></tr>
+        <tr><td>APPEND</td><td>追加</td></tr>
+        <tr><td>GETRANGE</td><td>取子串（原名 SUBSTR，2.6 后统一叫 GETRANGE）</td></tr>
+        <tr><td>SETRANGE</td><td>从偏移量写子串（不够长会用 <code>\0</code> 补齐）</td></tr>
+        <tr><td>GETBIT / SETBIT</td><td>位读写</td></tr>
+        <tr><td>BITCOUNT</td><td>统计 1 的个数</td></tr>
+        <tr><td>BITOP</td><td>AND/OR/XOR/NOT</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>现代新增</strong>（原书完全没有）：</p>
+
+    <ul>
+      <li><code>SET key value EX seconds NX/XX GET</code> —— Redis 2.6.12 起 <code>SET</code> 自带了 <code>SETNX</code>/<code>SETEX</code> 的能力，现在几乎不需要单独调用 <code>SETNX</code>/<code>SETEX</code>/<code>PSETEX</code> 了，一律用 <code>SET ... EX ... NX</code> 就够。</li>
+      <li><code>GETDEL</code>（6.2+）：取值并删除，一步到位。</li>
+      <li><code>GETEX</code>（6.2+）：取值的同时刷新/清除 TTL。</li>
+      <li><code>COPY</code>（6.2+）：原子复制一个 key。</li>
+      <li><code>OBJECT FREQ</code>/<code>OBJECT IDLETIME</code>：配合 LFU/LRU 淘汰策略查看访问频率/空闲时间。</li>
+      <li><code>BITFIELD</code>（3.2+）：在一个字符串里打包多个任意位宽的整数字段，一次调用完成多个位域的读写——这是对原书第 9 章"手动拼位"技巧的官方增强版。</li>
+    </ul>
+
+    <h2>3.2 列表（LIST）</h2>
+
+    <table>
+      <thead><tr><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>RPUSH / LPUSH</td><td>右/左端插入</td></tr>
+        <tr><td>RPOP / LPOP</td><td>右/左端弹出</td></tr>
+        <tr><td>LINDEX</td><td>按下标取值</td></tr>
+        <tr><td>LRANGE</td><td>取一段</td></tr>
+        <tr><td>LTRIM</td><td>裁剪保留一段</td></tr>
+        <tr><td>BLPOP / BRPOP</td><td>阻塞弹出</td></tr>
+        <tr><td>RPOPLPUSH / BRPOPLPUSH</td><td>弹出并推入另一个列表</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>现代新增/变化</strong>：</p>
+
+    <ul>
+      <li><code>LPOP</code>/<code>RPOP</code> 从 6.2 起支持一次弹出 <code>count</code> 个元素（<code>LPOP key count</code>），不用再循环调用。</li>
+      <li><code>LMPOP</code>/<code>BLMPOP</code>（7.0+）：一次从多个列表中弹出，替代了原书里"依次尝试多个队列做优先级"的部分场景。</li>
+      <li><code>LMOVE</code>/<code>BLMOVE</code>（6.2+）：<code>RPOPLPUSH</code>/<code>BRPOPLPUSH</code> 的正式继任者，语义相同但命名更清晰（可以是同一个 LIST 内部转移）。<strong><code>RPOPLPUSH</code> 现已标记为 deprecated</strong>，新代码应该用 <code>LMOVE</code>。</li>
+      <li><code>LPOS</code>（6.0.6+）：按值查找元素位置（原来只能自己 <code>LRANGE</code> 全量扫描）。</li>
+    </ul>
+
+    <p>原书这里有个练习题："用 LIST 替代 ZSET 做最近访问记录以节省内存"——这个思路今天依然成立：ZSET 每个成员要存分数（8 字节 double）+ 跳表指针开销，而 LIST（尤其是 listpack 编码下）纯粹是"顺序 + 值"，在只需要"最近 N 条、不需要按分数查询"的场景下更省内存。</p>
+
+    <h2>3.3 集合（SET）</h2>
+
+    <table>
+      <thead><tr><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>SADD / SREM</td><td>增/删</td></tr>
+        <tr><td>SISMEMBER / SMISMEMBER（6.2+，批量判断）</td><td>成员判断</td></tr>
+        <tr><td>SCARD</td><td>元素个数</td></tr>
+        <tr><td>SMEMBERS</td><td>取全部（<strong>大集合慎用</strong>，原书明确警告过）</td></tr>
+        <tr><td>SRANDMEMBER / SPOP</td><td>随机取/随机弹出</td></tr>
+        <tr><td>SMOVE</td><td>集合间移动元素</td></tr>
+        <tr><td>SINTER/SUNION/SDIFF（+STORE 变体）</td><td>交/并/差</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>现代补充</strong>：<code>SSCAN</code> 配合游标做增量遍历大 SET，避免 <code>SMEMBERS</code> 卡住整个 Redis（<code>SCAN</code> 系列命令——<code>SCAN</code>/<code>HSCAN</code>/<code>SSCAN</code>/<code>ZSCAN</code>——本身也是 2013 年之后（Redis 2.8）才引入的，原书完全没有涉及，这是这些年最重要的运维安全补丁之一：<strong>不要在生产环境用 <code>KEYS *</code>，用 <code>SCAN</code> 游标遍历</strong>）。</p>
+
+    <p>原书指出一个当时的 client 库 bug：Python 客户端的 <code>srem()</code> 返回布尔值而不是 Redis 实际返回的删除个数——这是<strong>客户端库的问题，不是 Redis 命令本身的问题</strong>，现代 redis-py/Jedis/ioredis 都已经如实返回整数。</p>
+
+    <h2>3.4 哈希（HASH）</h2>
+
+    <table>
+      <thead><tr><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>HSET / HMSET（已废弃，用 HSET）</td><td>写入</td></tr>
+        <tr><td>HGET / HMGET</td><td>读取</td></tr>
+        <tr><td>HDEL</td><td>删除字段</td></tr>
+        <tr><td>HGETALL / HKEYS / HVALS</td><td>取全部/键/值</td></tr>
+        <tr><td>HINCRBY / HINCRBYFLOAT</td><td>字段自增</td></tr>
+        <tr><td>HLEN / HEXISTS</td><td>长度/是否存在</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>现代新增（Redis 7.4，2024）—— HASH 字段级 TTL</strong>：<code>HEXPIRE</code>/<code>HPEXPIRE</code>/<code>HEXPIREAT</code>/<code>HPERSIST</code>/<code>HTTL</code>/<code>HGETEX</code>/<code>HGETDEL</code>。这是这些年 HASH 命令族最大的补强：以前 HASH 只能整体设置过期（<code>EXPIRE</code> 作用在整个 key 上），现在可以对单个字段设置独立 TTL，原书第 2、5 章手写的"清理循环"很多场景下可以直接用这组命令替代。</p>
+
+    <h2>3.5 有序集合（ZSET）</h2>
+
+    <table>
+      <thead><tr><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>ZADD / ZREM</td><td>增/删</td></tr>
+        <tr><td>ZSCORE / ZMSCORE（6.2+批量）</td><td>查分数</td></tr>
+        <tr><td>ZRANK / ZREVRANK</td><td>查排名</td></tr>
+        <tr><td>ZRANGE / ZREVRANGE</td><td>按排名取一段</td></tr>
+        <tr><td>ZRANGEBYSCORE / ZREVRANGEBYSCORE</td><td>按分数取一段</td></tr>
+        <tr><td>ZINCRBY</td><td>分数自增</td></tr>
+        <tr><td>ZCARD / ZCOUNT</td><td>数量/按分数计数</td></tr>
+        <tr><td>ZREMRANGEBYRANK / ZREMRANGEBYSCORE</td><td>按排名/分数批量删除</td></tr>
+        <tr><td>ZINTERSTORE / ZUNIONSTORE</td><td>交/并（可加权重、聚合方式）</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>现代新增</strong>：</p>
+
+    <ul>
+      <li><code>ZRANGE</code> 从 6.2 起被"合并"了——<code>ZRANGEBYSCORE</code>/<code>ZREVRANGEBYSCORE</code>/<code>ZRANGEBYLEX</code> 等的功能都可以通过 <code>ZRANGE key min max BYSCORE|BYLEX [REV] [LIMIT]</code> 一个命令表达，官方建议新代码优先用统一后的 <code>ZRANGE</code>。</li>
+      <li><code>ZRANGESTORE</code>（6.2+）：把 <code>ZRANGE</code> 的结果直接存成一个新 ZSET，不需要客户端读回来再写回去——第 10 章原书手写的"先查询、再交集/并集合并分片结果"这类模式，很多场景可以用它简化。</li>
+      <li><code>ZDIFF</code>/<code>ZDIFFSTORE</code>（6.2+）：ZSET 版本的差集，原书写作时压根没有这个命令。</li>
+      <li><code>ZADD</code> 支持 <code>GT</code>/<code>LT</code>/<code>NX</code>/<code>XX</code> 选项（3.0.2+/6.2+ 逐步补齐）：比如"只有新分数更高才更新"（<code>GT</code>），原书第 1 章的排行榜类场景现在可以少写一次 <code>ZSCORE</code> 判断。</li>
+      <li><code>ZMPOP</code>/<code>BZMPOP</code>（7.0+）：从多个 ZSET 弹出最高/最低分成员。</li>
+    </ul>
+
+    <h2>3.6 发布/订阅（Pub/Sub）</h2>
+
+    <p>原书列出 5 个命令：<code>SUBSCRIBE</code>/<code>UNSUBSCRIBE</code>/<code>PUBLISH</code>/<code>PSUBSCRIBE</code>/<code>PUNSUBSCRIBE</code>，并且花了很大篇幅讲<strong>为什么全书几乎不用 pub/sub</strong>：</p>
+
+    <ol>
+      <li><strong>可靠性问题</strong>：旧版本 Redis 里，一个消费慢的订阅者会导致 Redis 给它攒的发送缓冲区无限增长，可能拖垮甚至压根让 Redis 被 OS kill 掉；后来的版本靠 <code>client-output-buffer-limit pubsub</code> 配置项来主动断开慢订阅者（这一点在现代 Redis 里没有变化，依然要留意这个配置）。</li>
+      <li><strong>消息不持久</strong>：订阅者一旦断线，断线期间发布的消息全部丢失，没有重放能力。</li>
+    </ol>
+
+    <p>这两个问题在 2013 年只能靠"干脆不用 pub/sub，自己拿 LIST/ZSET 搭建可靠队列"来解决（第 6 章的内容）。<strong>现代 Redis 有了正式答案：Redis Stream（<code>XADD</code>/<code>XREAD</code>/<code>XREADGROUP</code>/<code>XACK</code>，5.0+）</strong>。Stream 原生支持：</p>
+
+    <ul>
+      <li>消息持久化在一个真正的日志结构里，订阅者断线重连后可以从上次的位置继续读（消费组 <code>XREADGROUP</code> + <code>XACK</code> 机制）。</li>
+      <li>消费组（Consumer Group）语义，多个 worker 分摊消费同一个流，类似 Kafka。</li>
+      <li><code>XPENDING</code>/<code>XCLAIM</code> 处理"消费者拿到消息但没确认"的情况。</li>
+    </ul>
+
+    <p>如果你今天要在 Redis 里做消息队列/事件总线，<strong>优先考虑 Stream，而不是重新发明原书第 6 章那一整套 LIST+ZSET 手工方案</strong>——但理解那套手工方案的设计思路仍然很有价值，因为 Stream 内部机制本质上是同一类问题的官方实现。</p>
+
+    <h2>3.7 其他命令</h2>
+
+    <h3>SORT</h3>
+
+    <p><code>SORT</code> 可以对 LIST/SET/ZSET 排序，还能用 <code>BY</code>/<code>GET</code> 语法引用外部 HASH 的字段（<code>BY weight_*->field</code>），这是 Redis 里少见的"跨结构关联查询"能力，很像 SQL 的 <code>ORDER BY</code> 引用其他表。第 7 章会把它和 SET 运算结合起来做搜索。</p>
+
+    <p><strong>现代提醒</strong>：<code>SORT</code> 的 <code>BY</code>/<code>GET</code> 外部引用模式在 <strong>Redis Cluster 下不可用</strong>（因为引用的 key 可能落在别的分片上），原书 2013 年写作时 Redis Cluster 还没发布，完全没提到这个限制，实际生产中如果上了 Cluster，这类 SORT 用法需要重新设计。</p>
+
+    <h3>基础事务：WATCH/MULTI/EXEC</h3>
+
+    <p>本章只讲最简单的 <code>MULTI</code>/<code>EXEC</code>（不带 WATCH），完整的乐观锁用法留到第 4 章。核心概念："一次不被打断的批量执行"，<strong>不是关系型数据库那种可以部分回滚的事务</strong>——一旦 <code>EXEC</code>，所有排队的命令都会顺序执行完，中途不会被其他客户端的命令插入，但也不支持"执行到一半发现问题就回滚"。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant C as 客户端
+    participant R as Redis
+
+    C->>R: WATCH key
+    R-->>C: OK
+    C->>R: MULTI
+    R-->>C: OK（进入排队模式）
+    C->>R: 命令 1（排队）
+    C->>R: 命令 2（排队）
+    C->>R: EXEC
+
+    alt 期间没有其他客户端修改 key
+        R-->>C: 顺序执行所有排队命令，返回结果数组
+    else 期间 key 被其他客户端修改
+        R-->>C: 返回 nil，事务被放弃（乐观锁失败）
+        C->>C: 应用层重试整个流程
+    end
+      </div>
+      <figcaption>WATCH/MULTI/EXEC 事务流程：key 被并发修改时 EXEC 返回 nil，需要应用层重试</figcaption>
+    </figure>
+
+    <p>现代 Redis 事务模型没有变化，但今天更常见的替代方案是：</p>
+
+    <ul>
+      <li><strong>Lua 脚本/Redis Functions</strong>：单个脚本本身就是原子的，比 MULTI/EXEC + WATCH 更简洁（第 11 章详解）。</li>
+      <li>如果只是要保证"读后写"不被并发覆盖，现代客户端库通常直接封装好了 <code>WATCH</code> 重试模式（如 redis-py 的 <code>Pipeline</code> 支持 <code>watch()</code> + 回调自动重试）。</li>
+    </ul>
+
+    <h3>过期（Expiration）</h3>
+
+    <table>
+      <thead><tr><th>命令</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>EXPIRE / PEXPIRE</td><td>秒/毫秒后过期</td></tr>
+        <tr><td>EXPIREAT / PEXPIREAT</td><td>指定时间戳过期</td></tr>
+        <tr><td>PERSIST</td><td>取消过期</td></tr>
+        <tr><td>TTL / PTTL</td><td>查剩余时间</td></tr>
+      </tbody>
+    </table>
+
+    <p>原书强调一个至今没变的限制：<strong>容器类型（LIST/SET/HASH/ZSET）只能整体过期，不能给里面的单个元素设置 TTL</strong>——这也是原书里大量出现"用 ZSET 存时间戳 + 手写清理循环"模式的根本原因。</p>
+
+    <p><strong>这一点在 2024 年被部分打破</strong>：Redis 7.4 引入的 <code>HEXPIRE</code> 系列命令让 HASH 的<strong>单个字段</strong>可以有自己的 TTL 了（前面 3.4 节提到过）。这是十年来对这个长期限制最实质的一次补强，但请注意——<strong>目前只有 HASH 支持字段级 TTL，LIST/SET/ZSET 依然是整体过期</strong>。</p>
+
+    <p>Redis 7.0 起 <code>EXPIRE</code>/<code>PEXPIRE</code>/<code>EXPIREAT</code> 还新增了 <code>NX</code>/<code>XX</code>/<code>GT</code>/<code>LT</code> 选项（只在没有 TTL 时设置 / 只在已有 TTL 时设置 / 只在新 TTL 更长时设置 / 只在新 TTL 更短时设置），原书完全没有涉及。</p>
+
+    <h2>3.8 本章小结</h2>
+
+    <p>原书统计这一章覆盖了 70+ 个命令，官方文档 <code>redis.io/commands</code> 现在收录的命令数量已经远超这个数字（加上 Stream、Geo、HyperLogLog、Bitfield、JSON、Search 等模块命令，总数是当年的好几倍）。原书作者坦诚地说"这本书给出的不总是最优答案"，多个练习题就是让读者回头改进第 1、2 章的示例代码——这个态度本身值得学习：<strong>先写能跑的版本，再迭代到更好的版本</strong>，不要一开始就追求完美设计。</p>
+
+    <h2>附：命令速查合并表（原书命令 + 现代新增标注）</h2>
+
+    <table>
+      <thead><tr><th>类型</th><th>原书命令</th><th>现代新增值得关注</th></tr></thead>
+      <tbody>
+        <tr><td>String</td><td>GET/SET/INCR/APPEND/GETRANGE/SETRANGE/GETBIT/SETBIT/BITCOUNT/BITOP</td><td>SET...NX EX、GETDEL、GETEX、COPY、BITFIELD</td></tr>
+        <tr><td>List</td><td>RPUSH/LPUSH/RPOP/LPOP/LRANGE/LTRIM/BLPOP/BRPOP/RPOPLPUSH</td><td>LMOVE/BLMOVE、LMPOP/BLMPOP、LPOS、批量 POP</td></tr>
+        <tr><td>Set</td><td>SADD/SREM/SISMEMBER/SMEMBERS/SRANDMEMBER/SPOP/SMOVE/S*STORE</td><td>SMISMEMBER、SSCAN</td></tr>
+        <tr><td>Hash</td><td>HSET/HGET/HMGET/HDEL/HGETALL/HINCRBY</td><td>HEXPIRE/HPERSIST/HTTL/HGETDEL/HGETEX、HRANDFIELD</td></tr>
+        <tr><td>ZSet</td><td>ZADD/ZREM/ZRANGE/ZRANGEBYSCORE/ZINCRBY/Z*STORE</td><td>统一 ZRANGE(BYSCORE/BYLEX/REV)、ZRANGESTORE、ZDIFF、ZMPOP、ZADD GT/LT</td></tr>
+        <tr><td>Pub/Sub</td><td>SUBSCRIBE/PUBLISH/PSUBSCRIBE</td><td><strong>Stream (XADD/XREAD/XREADGROUP)</strong> 作为可靠消息的官方替代</td></tr>
+        <tr><td>其他</td><td>SORT、MULTI/EXEC、EXPIRE/TTL/PERSIST</td><td>SCAN 系列游标遍历、EXPIRE NX/XX/GT/LT、Lua/Functions</td></tr>
+      </tbody>
+    </table>
+
+    <nav class="pagenav">
+      <a href="ch02.html"><span class="dir">上一章</span>第 2 章 剖析一个 Redis Web 应用</a>
+      <a href="ch04.html"><span class="dir">下一章</span>第 4 章 保障数据安全与性能</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>
+

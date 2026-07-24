@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 章 剖析一个 Redis Web 应用 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 2 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 2 章 剖析一个 Redis Web 应用</h1>
+    <blockquote><p>对应原书 <em>Redis in Action</em> 第 2 章 "Anatomy of a Redis web application"。原书基于 Redis 2.6 + Python 2.x 讲解，本文在忠实还原原书设计思路的基础上，补充了现代 Redis（7.x/8.x）的等价做法、生产实践经验，并给出 Python / Java / TypeScript 三语言示例（Web 框架以 Django、Hono.js 为例）。</p></blockquote>
+
+    <h2>2.0 背景：一个虚构的电商站点</h2>
+    <p>原书用一个虚构案例 "Fake Web Retailer" 贯穿全章：日均 PV 约 1 亿，日活约 500 万，日销 10 万+ 件商品。作者给出了一个关键性的工程判断，这个判断在今天依然成立：</p>
+    <blockquote><p>关系型数据库单机大约只能扛住 <strong>200~2,000 次/秒的行级写入</strong>（insert/update/delete），批量写入更快，但页面级的零散写入用不上批量优化。</p></blockquote>
+    <p>这一章要解决的都是"关系型数据库扛不住，但 Redis 天然适合"的场景：登录会话、购物车、页面缓存、行缓存、访问分析。这五个场景有一个共同点——<strong>都是高频、低价值密度的读写，用内存结构 + 简单命令就能解决，没必要占用关系型数据库的连接和 IO</strong>。这个判断标准放到今天依然是选择 Redis 的核心理由。</p>
+
+    <h2>2.1 登录与 Cookie 缓存</h2>
+
+    <h3>设计取舍：签名 Cookie vs Token Cookie</h3>
+    <p>原书对比了两种会话方案：</p>
+    <table>
+      <thead><tr><th>方案</th><th>优点</th><th>缺点</th></tr></thead>
+      <tbody>
+        <tr><td><strong>签名 Cookie</strong>（内容+签名都放 Cookie）</td><td>无需服务端存储，验证自包含</td><td>签名逻辑容易写错，一旦签发/校验疏漏就是安全漏洞</td></tr>
+        <tr><td><strong>Token Cookie</strong>（Cookie 只放随机 token，服务端存 token→用户的映射）</td><td>Cookie 体积小（移动端/弱网友好），易扩展字段</td><td>需要服务端存储；如果这个存储是关系型数据库，读写代价高</td></tr>
+      </tbody>
+    </table>
+    <p>Fake Web Retailer 选择 Token Cookie，把"token→用户"这张表从关系型数据库搬到 Redis 的 HASH 里：</p>
+<pre><code class="language-text">login:&lt;token&gt;  →  HASH { }  # 简化为直接存 username 字符串
+recent:        →  ZSET { token: 最近访问时间戳 }
+viewed:&lt;token&gt; →  ZSET { item_id: 浏览顺序 }，只保留最近 25 个
+</code></pre>
+    <p>核心函数（对应原书 Listing 2.1 / 2.2）：</p>
+    <ul>
+      <li><code>check_token()</code>：<code>HGET login: token</code> 取用户名。</li>
+      <li><code>update_token()</code>：每次页面访问都调用——更新 <code>login:</code> 里的 token→user、刷新 <code>recent:</code> 里该 token 的时间戳、如果本次浏览了商品则把商品 ID 塞进 <code>viewed:&lt;token&gt;</code> 并裁剪到最近 25 条。</li>
+    </ul>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant B as 浏览器
+    participant App as Web 应用
+    participant R as Redis
+    B->>App: 请求页面（携带 token Cookie）
+    App->>R: GET login:&lt;token&gt;
+    R-->>App: 返回用户名（或空）
+    App->>R: SET login:&lt;token&gt; user
+    App->>R: ZADD recent: now token
+    App->>R: ZADD viewed:&lt;token&gt; now item
+    App->>R: ZREMRANGEBYRANK viewed:&lt;token&gt; 0 -26
+    App-->>B: 渲染响应，写回 token Cookie
+      </div>
+      <figcaption>登录会话流程：token 作为 Redis HASH/ZSET 的 key，映射到用户信息与最近浏览记录</figcaption>
+    </figure>
+
+    <p>原书数据：这套方案可以做到 <strong>≥2 万次商品浏览记录/秒</strong>，是关系型数据库方案的 10~100 倍。</p>
+
+    <h3>清理策略：为什么不直接用 EXPIRE</h3>
+    <p>原书刻意没有用 <code>EXPIRE</code> 来自动过期会话，而是维护一个 <code>recent:</code> ZSET（按最后访问时间排序）+ 一个后台清理循环 <code>clean_sessions()</code>：当 <code>ZCARD recent:</code> 超过阈值（书中设为 1000 万），就用 <code>ZRANGE</code> 取出最老的一批 token，依次删除 <code>login:</code>、<code>viewed:&lt;token&gt;</code>、<code>recent:</code> 里的对应条目。</p>
+    <p>作者明确解释了为什么不用 <code>EXPIRE</code>：</p>
+    <ol>
+      <li><strong>需要一个显式的总量上限</strong>（比如"最多保留 1000 万活跃会话"），而 <code>EXPIRE</code> 只能控制单个 key 的存活时间，做不到"超过总量就淘汰最老的"。</li>
+      <li><strong>为将来的"购物车放弃"分析留口子</strong>——如果用 <code>EXPIRE</code> 自动删除，就没有机会在删除前对这些即将过期的会话做业务分析。</li>
+    </ol>
+    <p>作者也坦诚地指出这里存在一个竞态条件：清理循环可能恰好在用户访问的同一时刻删除了他的会话。他的态度是——这个概率极低，即使发生，最坏结果只是用户被迫重新登录，不值得为此引入额外的加锁开销（第 3、4 章会讲真正的并发控制手段）。</p>
+    <blockquote><p><strong>给现代读者的启示</strong>：这个"要不要为极小概率的竞态加锁"的权衡思路，在今天做缓存/会话系统设计时依然通用——<strong>先问"最坏情况的业务代价是什么"，再决定要不要加锁</strong>，不要无脑加锁。</p></blockquote>
+
+    <h3>现代 Redis 怎么做会做得更好</h3>
+    <p>原书这套"ZSET + 轮询清理线程"的方案是 2013 年的工程妥协，今天有更省心的替代方案：</p>
+    <ul>
+      <li><strong>直接用 <code>EXPIRE</code>/<code>SET ... EX</code> 做会话 TTL</strong>：如果业务不需要"精确总量上限"和"过期前分析"，现代做法就是给 <code>login:&lt;token&gt;</code> 设置滑动过期时间（每次访问 <code>EXPIRE</code> 续期），完全不需要自己写清理循环。Redis 的过期是<strong>惰性删除 + 定期主动扫描</strong>结合的，不会有内存泄漏问题。</li>
+      <li><strong>如果确实需要"总量上限 + 过期前钩子"</strong>：可以用 <strong>keyspace notification</strong>（<code>notify-keyspace-events Ex</code>）订阅 <code>expired</code> 事件，在真正过期时触发分析逻辑，而不必自己维护一个轮询线程去猜"谁该被清理"。</li>
+      <li><strong>Redis 7.4+ 的 Hash Field Expire（<code>HEXPIRE</code>/<code>HPEXPIRE</code>/<code>HTTL</code>/<code>HPERSIST</code>）</strong>：允许给 HASH 里的<strong>单个字段</strong>设置 TTL。如果把会话建模成一个大 HASH（<code>sessions</code> 这个 key 下面每个 field 是一个 token），现在可以直接对 field 级别做过期，不再需要额外的 <code>recent:</code> ZSET 来模拟"哪些 token 该清理"。这是这几年 Redis 在这个具体场景下最大的能力补齐。</li>
+      <li><strong>生产实践</strong>：会话存储更推荐直接用现成的 session 中间件（Django 的 <code>django-redis</code> session backend、Node 生态的 <code>connect-redis</code>），而不是手写 token→user 的 HASH 逻辑，除非你需要书中这种"顺带记录最近浏览"的定制行为。</li>
+    </ul>
+
+    <h3>代码示例</h3>
+    <p><strong>Python（redis-py，现代写法）</strong></p>
+<pre><code class="language-python">import time
+import redis
+
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+
+SESSION_TTL = 30 * 60  # 30 分钟滑动过期
+
+def check_token(token: str) -> str | None:
+    return r.get(f"login:{token}")
+
+def update_token(token: str, user: str, item: str | None = None):
+    pipe = r.pipeline()
+    pipe.set(f"login:{token}", user, ex=SESSION_TTL)  # 现代 SET 自带 EX，替代 SETEX
+    if item:
+        key = f"viewed:{token}"
+        pipe.zadd(key, {item: time.time()})            # 现代 zadd 用 mapping，而非位置参数
+        pipe.zremrangebyrank(key, 0, -26)               # 只保留最近 25 条
+        pipe.expire(key, SESSION_TTL)
+        pipe.zincrby("viewed:", -1, item)               # 全局热度榜，负分实现"最热在前"
+    pipe.execute()
+</code></pre>
+    <blockquote><p>对比原书代码：原书 <code>conn.zadd('recent:', token, timestamp)</code> 是老版本 redis-py 的位置参数写法；现代 redis-py（4.x/5.x）<code>zadd</code> 统一要求传 <code>{member: score}</code> 字典。<code>conn.setex(key, value, seconds)</code> 这种参数顺序在现代客户端里也变成了 <code>set(key, value, ex=seconds)</code> 或 <code>setex(key, seconds, value)</code>——<strong>参数顺序刚好相反</strong>，照抄原书代码在新版客户端上会直接出错，这是升级迁移时最容易踩的坑。</p></blockquote>
+
+    <p><strong>Java（Jedis 5.x）</strong></p>
+<pre><code class="language-java">import redis.clients.jedis.UnifiedJedis;
+import redis.clients.jedis.params.SetParams;
+
+public class SessionStore {
+    private final UnifiedJedis jedis;
+    private static final long SESSION_TTL = 30 * 60; // 秒
+
+    public SessionStore(UnifiedJedis jedis) {
+        this.jedis = jedis;
+    }
+
+    public String checkToken(String token) {
+        return jedis.get("login:" + token);
+    }
+
+    public void updateToken(String token, String user, String item) {
+        jedis.set("login:" + token, user, new SetParams().ex(SESSION_TTL));
+        if (item != null) {
+            String key = "viewed:" + token;
+            jedis.zadd(key, System.currentTimeMillis() / 1000.0, item);
+            jedis.zremrangeByRank(key, 0, -26);
+            jedis.expire(key, SESSION_TTL);
+            jedis.zincrby("viewed:", -1, item);
+        }
+    }
+}
+</code></pre>
+
+    <p><strong>TypeScript（ioredis + Hono.js）</strong></p>
+<pre><code class="language-typescript">// session.ts
+import { Redis } from "ioredis";
+
+const redis = new Redis();
+const SESSION_TTL = 30 * 60;
+
+export async function checkToken(token: string) {
+  return redis.get(`login:${token}`);
+}
+
+export async function updateToken(token: string, user: string, item?: string) {
+  const pipe = redis.pipeline();
+  pipe.set(`login:${token}`, user, "EX", SESSION_TTL);
+  if (item) {
+    const key = `viewed:${token}`;
+    pipe.zadd(key, Date.now() / 1000, item);
+    pipe.zremrangebyrank(key, 0, -26);
+    pipe.expire(key, SESSION_TTL);
+    pipe.zincrby("viewed:", -1, item);
+  }
+  await pipe.exec();
+}
+</code></pre>
+<pre><code class="language-typescript">// app.ts — Hono.js 中间件，从 Cookie 里取 token 并续期会话
+import { Hono } from "hono";
+import { getCookie, setCookie } from "hono/cookie";
+import { checkToken, updateToken } from "./session";
+import { randomUUID } from "crypto";
+
+const app = new Hono();
+
+app.use("*", async (c, next) => {
+  let token = getCookie(c, "token");
+  if (!token) {
+    token = randomUUID();
+    setCookie(c, "token", token, { httpOnly: true, maxAge: 30 * 60 });
+  }
+  const user = await checkToken(token);
+  c.set("user", user);
+  c.set("token", token);
+  await next();
+  await updateToken(token, user ?? "anonymous"); // 请求结束后续期
+});
+
+export default app;
+</code></pre>
+
+    <h2>2.2 购物车</h2>
+    <p>原书的关键洞察是：<strong>购物车没必要单独设计存储方案，直接复用登录会话的 token 当 key</strong>。购物车是一个 <code>cart:&lt;token&gt;</code> 的 HASH，field 是商品 ID，value 是数量：</p>
+<pre><code class="language-python">def add_to_cart(token: str, item: str, count: int):
+    key = f"cart:{token}"
+    if count &lt;= 0:
+        r.hdel(key, item)          # 原书代码写的是 conn.hrem(...)，hrem 并不是真实存在的 Redis/redis-py 命令名，
+                                    # 这是原书代码里的一个笔误，真正应该调用的是 HDEL / hdel
+    else:
+        r.hset(key, item, count)
+</code></pre>
+    <blockquote><p><strong>踩坑提醒</strong>：原书 Listing 2.4 无论是书里印刷的文字还是配套源码，都写的是 <code>conn.hrem(...)</code>。这在 redis-py（不论新旧版本）里都不是一个真实存在的方法名——正确的命令是 <code>HDEL</code>。如果你直接复制原书代码会得到 <code>AttributeError</code>，这是原书本身的错误，不是版本变迁导致的。</p></blockquote>
+    <p>现代做法上，购物车通常直接给 <code>cart:&lt;token&gt;</code> 这个 key 设置和会话一致的 TTL（<code>EXPIRE</code>），会话过期购物车自然消失，不需要原书里"清理会话时顺带删购物车"的额外逻辑（<code>clean_full_sessions()</code>）。</p>
+    <p>作者也提到一个当年没做但值得记住的方向：既然 session 和 cart 都在 Redis 里，天然适合做"浏览了 A 最终购买 A 的转化率""买了 A 的人还买了 B"这类推荐分析——这正是后面电商推荐系统、实时特征存储的雏形。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Token["会话 token"] --> Cart["cart:&lt;token&gt; HASH<br/>field = item, value = 数量"]
+    Add["add_to_cart(item, count)"] -->|"count &gt; 0"| HSET["HSET cart:&lt;token&gt; item count"]
+    Add -->|"count &lt;= 0"| HDEL["HDEL cart:&lt;token&gt; item"]
+    HSET --> Cart
+    HDEL --> Cart
+    Session["会话过期<br/>EXPIRE login:&lt;token&gt;"] -. "同步 TTL" .-> CartExpire["cart:&lt;token&gt; 自动过期<br/>购物车随会话一起消失"]
+      </div>
+      <figcaption>购物车 HASH 结构：以商品 ID 为 field，数量为 value，TTL 与会话保持同步，无需单独清理逻辑</figcaption>
+    </figure>
+
+    <h2>2.3 页面缓存</h2>
+    <p>场景：95% 的页面一天最多变化一次，没必要每次请求都重新渲染。方案是标准的 <strong>cache-aside</strong>：</p>
+<pre><code class="language-python">def cache_request(request, callback):
+    if not can_cache(request):
+        return callback(request)
+    key = "cache:" + hash_request(request)
+    content = r.get(key)
+    if content is None:
+        content = callback(request)
+        r.setex(key, 300, content)   # 5 分钟 TTL
+    return content
+</code></pre>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Req(["请求到达"]) --> CanCache{"can_cache(request) ?"}
+    CanCache -- 否 --> Render["直接调用 callback(request) 渲染"]
+    Render --> Serve(["返回响应"])
+    CanCache -- 是 --> Key["key = cache:hash_request(request)"]
+    Key --> Get["GET key"]
+    Get --> Hit{"缓存命中?"}
+    Hit -- 是 --> ServeCached(["直接返回缓存内容"])
+    Hit -- 否 --> Miss["调用 callback(request) 渲染页面"]
+    Miss --> Setex["SETEX key 300 content"]
+    Setex --> Serve
+      </div>
+      <figcaption>页面缓存的 cache-aside 读取路径：命中直接返回，未命中渲染后写回并设置 TTL</figcaption>
+    </figure>
+
+    <p>原书数据：把一个 20~50ms 的动态渲染页面，换成一次 Redis 往返（本地 &lt;1ms，同机房 &lt;5ms）。这个思路今天完全没变，唯一要补的是两个 2013 年还不常讨论、但现在是标配的问题：</p>
+    <ul>
+      <li><strong>缓存击穿/惊群（cache stampede）</strong>：如果一个热点 key 恰好过期，同一瞬间可能有几百个请求同时穿透到后端重新计算。现代做法是加<strong>互斥锁</strong>（第 6 章会讲 Redis 分布式锁）或用 <strong>概率性提前刷新（probabilistic early expiration，如 XFetch 算法）</strong>，而不是像原书那样让所有并发请求都直接穿透。</li>
+      <li><strong>缓存版本化/软删除</strong>：直接 <code>DEL</code> 缓存 key 容易在高并发下和"重新写入"竞争，现代实践更倾向于给缓存 value 加时间戳/版本号，用"写入新版本"代替"删除旧版本"。</li>
+    </ul>
+
+    <h2>2.4 数据库行缓存</h2>
+    <p>场景：秒杀页面需要展示"剩余库存"这种强时效数据，整页缓存会导致库存数字错误，但每次都查数据库又扛不住。方案是用一个后台常驻进程，按不同商品各自的更新频率，把数据库的行以 JSON 字符串形式缓存进 Redis：</p>
+<pre><code class="language-text">schedule:  ZSET { row_id: 下次应该刷新的时间戳 }
+delay:     ZSET { row_id: 刷新间隔秒数（≤0 表示应该停止缓存并清除） }
+inv:&lt;id&gt;   STRING  JSON 序列化的行数据
+</code></pre>
+    <p><code>cache_rows()</code> 是一个死循环：每次从 <code>schedule:</code> 取分数最小（最快到期）的一条，判断是否到期，到期就重新查库、写回 <code>inv:&lt;id&gt;</code>、按 <code>delay:</code> 里的间隔重新计算下次调度时间；如果 <code>delay</code> ≤ 0 就把这一行从两个 ZSET 中移除并删除缓存，相当于"取消缓存"。</p>
+    <p>原书专门用一个侧栏讨论了"为什么用 JSON 而不是 Protobuf/Thrift/BSON/MessagePack"——作者的答案很诚实：这只是个人偏好（可读性 + 几乎所有语言都有现成库），并且明确说"你想换别的格式完全没问题"。另一个侧栏讲了 <strong>Redis 不支持嵌套结构</strong>（HASH 里不能塞 ZSET）这个设计取舍：作者的类比是"如果 HASH 里嵌套了 5 层，你怎么对最深层的一个值做 INCR？"——保持命令语义简单是 Redis 的设计哲学，解决办法要么是<strong>用 key 命名约定</strong>（<code>user:123</code> 是 HASH，<code>user:123:posts</code> 是独立的 ZSET），要么是<strong>应用层自己序列化</strong>。这个设计哲学到今天完全没变——RedisJSON（现已合入 Redis 8 的 <code>JSON.*</code> 命令族）某种程度上就是在回应这个多年的诉求，但核心 KV/结构化命令的语义仍然保持扁平。</p>
+    <p><strong>现代等价方案</strong>：这种"定时轮询数据库同步到缓存"的模式，今天更常见的实现是：</p>
+    <ul>
+      <li>用 <strong>CDC（Change Data Capture，如 Debezium 监听 MySQL/Postgres binlog）</strong> 把行变更实时推到 Redis，而不是自己写轮询调度器猜"多久该刷新一次"。</li>
+      <li>库存这种强一致性要求的场景，现在业界更倾向于<strong>库存直接放在 Redis 里做原子扣减（<code>DECRBY</code> / Lua 脚本），数据库作为异步落盘的最终存储</strong>，而不是反过来"数据库为主、Redis 为缓存"。这是本章思路的一个重要延伸，第 6、11 章会涉及原子操作和 Lua 脚本。</li>
+    </ul>
+
+    <h2>2.5 网页访问分析</h2>
+    <p>场景延续：Fake Web Retailer 把 10 万个商品页全部缓存，缓存撑爆了内存，只能容纳约 1 万个页面。于是需要"只缓存最热门的页面"。</p>
+    <p>做法是复用 <code>update_token()</code> 里已经记录的浏览数据，追加一行：</p>
+<pre><code class="language-python">r.zincrby("viewed:", -1, item)   # 分数取负数，让"看得最多的"排在 ZRANGE 最前面（rank 0）
+</code></pre>
+    <p>为了不让这个全局热度榜无限增长、也让新商品有机会追上来，<code>rescale_viewed()</code> 每 5 分钟做一次：</p>
+    <ol>
+      <li><code>ZREMRANGEBYRANK viewed: 20000 -1</code>——只留 Top 2 万。</li>
+      <li>用 <code>ZINTERSTORE</code>（权重设为 0.5，对 <code>viewed:</code> 和自身求交集）把所有分数减半——这是一个很巧妙的技巧：<strong>ZINTERSTORE 可以在合并多个 ZSET 时，对每个输入分别乘一个权重</strong>，这里用"自己和自己相交、权重 0.5"来实现"整体分数减半"，避免了新写一个命令来做批量数值变换。</li>
+    </ol>
+    <p><code>can_cache()</code> 最终的判断逻辑：请求里能提取出商品 ID、且不是动态请求、且该商品在 <code>viewed:</code> 里的 <code>ZRANK</code> &lt; 10000，才允许缓存。</p>
+    <blockquote><p><strong>现代视角</strong>：ZINCRBY/ZRANK 做热度排行榜这个模式至今仍是 Redis 排行榜类应用的标准做法，几乎没有过时。如果热度统计的量级进一步上升（比如要统计"独立访客数"而不是"浏览次数"），现代 Redis 会推荐引入 <strong>HyperLogLog（<code>PFADD</code>/<code>PFCOUNT</code>）</strong> 做基数估算，或者用 <strong>RedisTimeSeries</strong> 模块做带时间窗口的统计——这些都是 2013 年之后才出现、原书完全没有涉及的能力，值得在真实项目里替换掉手写的"定时减半"轮询逻辑。</p></blockquote>
+
+    <h2>2.6 本章清单对照表</h2>
+    <table>
+      <thead><tr><th>Listing</th><th>内容</th><th>对应源码函数</th></tr></thead>
+      <tbody>
+        <tr><td>2.1</td><td><code>check_token()</code> 查询登录用户</td><td><code>check_token</code></td></tr>
+        <tr><td>2.2</td><td><code>update_token()</code> 更新会话/浏览记录</td><td><code>update_token</code>（第一版）</td></tr>
+        <tr><td>2.3</td><td><code>clean_sessions()</code> 会话清理守护循环</td><td><code>clean_sessions</code></td></tr>
+        <tr><td>2.4</td><td><code>add_to_cart()</code> 购物车增删</td><td><code>add_to_cart</code></td></tr>
+        <tr><td>2.5</td><td><code>clean_full_sessions()</code> 清理时顺带删购物车</td><td><code>clean_full_sessions</code></td></tr>
+        <tr><td>2.6</td><td><code>cache_request()</code> 页面缓存中间件</td><td><code>cache_request</code></td></tr>
+        <tr><td>2.7</td><td><code>schedule_row_cache()</code> 设置行缓存刷新计划</td><td><code>schedule_row_cache</code></td></tr>
+        <tr><td>2.8</td><td><code>cache_rows()</code> 行缓存守护循环</td><td><code>cache_rows</code></td></tr>
+        <tr><td>2.9</td><td><code>update_token()</code> 加入热度统计</td><td><code>update_token</code>（第二版）</td></tr>
+        <tr><td>2.10</td><td><code>rescale_viewed()</code> 热度榜定期衰减</td><td><code>rescale_viewed</code></td></tr>
+        <tr><td>2.11</td><td><code>can_cache()</code> 判断是否值得缓存</td><td><code>can_cache</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>2.7 本章小结（原书 + 现代补充）</h2>
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书的收尾提醒是：<strong>不要害怕在早期代码基础上叠加新需求</strong>——购物车和访问分析都是直接复用登录会话这一份数据结构演化出来的，而不是重新设计。这是一个很朴素但常被忽视的工程建议。</p>
+      <p>补充给现代读者的清单：</p>
+      <ol>
+        <li>会话/购物车 TTL 优先用原生 <code>EXPIRE</code>/<code>SET EX</code>，只有在需要"硬性总量上限"或"过期前钩子"时才考虑 keyspace notification 或应用层调度。</li>
+        <li>页面/行缓存要考虑缓存击穿保护（锁或概率early expiration），原书没讨论这个问题是因为 2013 年这还不是主流话题。</li>
+        <li>数据库行缓存这种"轮询同步"模式，能用 CDC 替代的就不要自己写调度器。</li>
+        <li>热度排行榜（ZINCRBY + ZRANK）模式基本没有过时，但基数类统计（去重计数）现在应该用 HyperLogLog，而不是复用浏览次数榜单。</li>
+      </ol>
+    </div>
+
+    <nav class="pagenav">
+      <a href="ch01.html"><span class="dir">上一章</span>第 1 章 认识 Redis</a>
+      <a href="ch03.html"><span class="dir">下一章</span>第 3 章 Redis 命令大全</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

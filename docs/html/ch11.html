@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 11 章 用 Lua 给 Redis 写脚本 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 11 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 11 章 用 Lua 给 Redis 写脚本</h1>
+    <blockquote><p>对应原书第 11 章 "Scripting Redis with Lua"，全书最后一个技术主题章节。Redis 2.6 首次引入 Lua 脚本能力，本章把前面几章的 WATCH/MULTI/EXEC、锁、信号量、自动补全、市场交易全部重写成 Lua 版本，用实测数据证明"用对了 Lua，代码更简单、性能更好"。</p></blockquote>
+
+    <h2>11.0 现代最重要的更新：Redis Functions</h2>
+    <p>在深入本章内容之前，必须先说清楚这十年最大的变化：<strong>Redis 7.0（2022 年）引入了 Redis Functions（<code>FUNCTION LOAD</code>/<code>FCALL</code>）</strong>，它是 <code>EVAL</code>/<code>SCRIPT LOAD</code> 的官方"升级版"，直接解决了本章第一节要手工解决的问题：</p>
+    <ul>
+      <li>原书 <code>script_load()</code> 自己实现了一个 SHA1 缓存 + <code>EVALSHA</code> 失败自动回退 <code>EVAL</code> 的包装器，因为 Redis 重启或 <code>SCRIPT FLUSH</code> 会让缓存的脚本哈希失效（<code>NOSCRIPT</code> 错误）。</li>
+      <li><strong>Redis Functions 把脚本作为 RDB/AOF 持久化的一部分保存</strong>，重启、<code>SCRIPT FLUSH</code> 都不会影响已注册的 Function，天然不需要"哈希缓存失效重试"这一整套逻辑。</li>
+      <li>Functions 支持"库"的概念（一个库里可以定义多个函数），支持版本化，比裸 <code>EVAL</code> 脚本更适合作为<strong>长期存在</strong>的业务逻辑。</li>
+    </ul>
+    <p><strong>什么时候还用 EVAL/EVALSHA</strong>：一次性、临时、探索性的脚本依然适合直接 <code>EVAL</code>；需要长期稳定运行、多次调用的业务逻辑，现代实践优先用 Functions。本章讲的所有 Lua 脚本原理（KEYS/ARGV、原子性、可否中断）在 Functions 里完全适用，只是加载/持久化的机制更省心了。</p>
+
+    <h2>11.1 不写 C 代码也能扩展 Redis</h2>
+
+    <h3>加载和调用脚本</h3>
+    <p><code>SCRIPT LOAD &lt;script&gt;</code> 把脚本编译缓存，返回 SHA1；<code>EVALSHA &lt;sha&gt; &lt;numkeys&gt; key... arg...</code> 用哈希调用，避免每次都传完整脚本体。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant C as "客户端"
+    participant R as "Redis"
+    C->>R: "EVAL script numkeys key... arg..."
+    R->>R: "编译脚本，按 SHA1 缓存"
+    R-->>C: "执行结果"
+    C->>R: "EVALSHA sha1 numkeys key... arg... (缓存命中)"
+    R-->>C: "执行结果（无需重新编译）"
+    C->>R: "EVALSHA sha1 ... (缓存已失效，如重启/SCRIPT FLUSH)"
+    R-->>C: "NOSCRIPT 错误"
+    C->>R: "回退为 EVAL script ... （重新传完整脚本）"
+    R-->>C: "执行结果并重新缓存"
+      </div>
+      <figcaption>EVAL 首次编译并按 SHA1 缓存脚本；后续用 EVALSHA 命中缓存；缓存失效时返回 NOSCRIPT，客户端需回退到 EVAL 重新发送脚本源码</figcaption>
+    </figure>
+
+    <p><strong>KEYS 和 ARGV 的关键区别</strong>：KEYS 参数是给未来的 Redis Cluster 用的——集群需要提前知道脚本会碰哪些 key，才能验证它们是否落在同一个哈希槽，拒绝跨槽脚本。ARGV 没有这个限制，只是纯数据。<strong>这个设计意图在原书写作时是"面向未来"的（Cluster 2015 年才发布），今天已经是真实存在的约束</strong>：如果你的 Lua 脚本/Function 要跑在 Redis Cluster 上，必须严格把所有涉及的 key 放进 KEYS，否则集群会拒绝执行或产生不可预期的结果。</p>
+
+    <p><strong>返回值类型转换表</strong>（Lua → 客户端语言，原理没有变化）：<code>true</code>→1，<code>false</code>→nil/None，<code>nil</code>→截断后续返回值，浮点数→截断成整数，字符串/整数原样返回。原书建议尽量返回字符串手动解析，避免类型转换的歧义。</p>
+
+    <h3>脚本的原子性与"不可中断"的风险</h3>
+    <ul>
+      <li><strong>原子性</strong>：<code>EVAL</code>/<code>EVALSHA</code>（以及 Functions 的 <code>FCALL</code>）在 Redis 眼里是<strong>一条命令</strong>，执行期间不会有其他命令插进来，比 MULTI/EXEC 隔离性更强。</li>
+      <li><strong>风险</strong>：Lua 是图灵完备的通用语言，一个死循环脚本会卡住整个 Redis。安全阀：如果脚本只做了读操作，超过 <code>lua-time-limit</code> 后可以用 <code>SCRIPT KILL</code> 杀掉；<strong>如果脚本已经写了数据，<code>SCRIPT KILL</code> 不安全</strong>（可能导致数据不一致），唯一的恢复手段是 <code>SHUTDOWN NOSAVE</code>（会丢失上次快照/AOF 之后的所有数据）。原书的忠告至今是铁律：<strong>上线前必须充分测试 Lua 脚本</strong>。</li>
+    </ul>
+
+    <h3>写 KEYS 之外的 key 会破坏 Cluster 兼容性</h3>
+    <p>原书的 <code>create_status_lua</code> 脚本故意写了一个没有出现在 KEYS 参数里的 key（<code>status:&lt;id&gt;</code>，id 是脚本内生成的），用来演示"技术上可行，但破坏未来 Cluster 兼容性"——这一点今天不是"未来"而是"现实"：如果这个脚本要跑在 Redis Cluster 上，必须失败或产生错误路由。</p>
+
+    <h2>11.2 用 Lua 重写锁和信号量</h2>
+
+    <p>本章反复出现的核心论点是：能把多次网络往返压缩成一次原子脚本，就能同时消除竞态和大幅提升性能。下面这张图对比了原书前几章"客户端多次往返"的写法和本章"单次原子脚本"的写法：</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TB
+    subgraph Naive["朴素多轮客户端逻辑（有竞态）"]
+        direction TB
+        N1["① 客户端 READ<br/>读取当前状态"] --> N2["② 客户端本地决策<br/>（判断是否可执行）"]
+        N2 --> N3["③ 客户端 WRITE<br/>写回结果"]
+        N1 -.-> RT1["网络往返 1"]
+        N2 -.-> RT2["其他客户端可能在此期间<br/>修改了数据"]
+        N3 -.-> RT3["网络往返 2"]
+    end
+    subgraph Lua["原子 Lua 脚本（单次往返）"]
+        direction TB
+        L1["EVAL script KEYS ARGV"] --> L2["Redis 内部一次性完成：<br/>读取 → 判断 → 写入"]
+        L2 --> L3["返回最终结果"]
+        L1 -.-> RTL["仅一次网络往返，<br/>期间不会被其他命令打断"]
+    end
+      </div>
+      <figcaption>朴素客户端逻辑需要三次独立的网络往返（读、决策、写），期间可能被其他客户端插入修改，产生竞态；原子 Lua 脚本把整个逻辑压缩进 Redis 内部一次执行，只需一次往返且不可被打断</figcaption>
+    </figure>
+
+    <h3>锁</h3>
+    <p>原书用一个基准测试对比原始锁（SETNX+EXPIRE+WATCH 释放）和 Lua 版本（EXISTS+SETEX 获取，GET+DEL 原子释放）：<strong>Lua 版本在 5/10 个并发客户端下，成功获取锁次数比原始版本多出 100%以上</strong>，主要收益来自减少网络往返次数。</p>
+
+<pre><code class="language-lua">-- 获取锁
+if redis.call('exists', KEYS[1]) == 0 then
+    return redis.call('setex', KEYS[1], unpack(ARGV))
+end
+</code></pre>
+
+<pre><code class="language-lua">-- 释放锁
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1]) or true
+end
+</code></pre>
+
+    <h3>信号量</h3>
+    <p>Lua 版本把"清理过期持有者 + 检查名额 + 加入"打包成一次原子调用，<strong>不再需要原书 6.3.2 节那套"计数器 ZSET + owner ZSET + 外层锁"的三层结构</strong>——因为整个检查+写入过程本身就是原子的，天然公平，谁的脚本先执行谁就先拿到名额。这是本章最能体现"Lua 简化设计"的例子：原来需要三个数据结构配合一把锁才能保证正确，现在一个脚本就够了。</p>
+
+    <h2>11.3 彻底告别 WATCH/MULTI/EXEC</h2>
+
+    <h3>自动补全重写</h3>
+    <p>原书统计原始的公会自动补全函数（第 6 章的哨兵+WATCH 版本）大概 <strong>40% 的代码量都在处理重试逻辑</strong>。改写成 Lua 后不再需要任何重试代码。基准测试结果更有说服力：原始版本随并发数上升<strong>成功次数反而下降</strong>（10 个客户端时从 26,339 掉到 6,141，因为 WATCH 冲突重试太多），Lua 版本则持续上升到 128,217——<strong>Lua 版本在 10 个并发客户端下处理的自动补全请求是原始版本的 20 倍以上</strong>。</p>
+
+    <h3>市场交易重写</h3>
+    <p>原书把第 6 章"粗粒度锁 + WATCH 买家账户"的市场购买逻辑，简化成一个 Lua 脚本——查价格、查余额、扣款、转移物品、下架，全部在一次 <code>EVAL</code> 里完成，<strong>不需要锁，也不需要 WATCH</strong>。60 秒基准测试（5 卖家+5买家）对比：</p>
+
+    <table>
+      <thead><tr><th>方案</th><th>成交数</th><th>重试次数</th><th>平均延迟</th></tr></thead>
+      <tbody>
+        <tr><td>不加锁</td><td>&lt;600</td><td>161,000</td><td>498ms</td></tr>
+        <tr><td>粗粒度锁</td><td>20,500</td><td>0</td><td>14ms</td></tr>
+        <tr><td>细粒度锁</td><td>111,000</td><td>0</td><td>&lt;3ms</td></tr>
+        <tr><td><strong>Lua</strong></td><td><strong>480,000</strong></td><td><strong>0</strong></td><td><strong>&lt;1ms</strong>（实测约 0.61ms）</td></tr>
+      </tbody>
+    </table>
+
+    <p>Lua 版本比细粒度锁还快 <strong>4.25 倍</strong>。</p>
+
+    <p><strong>但作者明确指出 Lua 的边界</strong>：脚本只能访问 Redis 内部能看到的数据，<strong>不能在脚本执行过程中去调用外部数据库/API</strong>——这是锁/WATCH 方案相对 Lua 的唯一优势场景。如果你的原子操作需要"读 Redis → 查外部系统 → 写回 Redis"，Lua 帮不上忙，还是得用锁。</p>
+
+    <h2>11.4 用 Lua 给 LIST 分片</h2>
+    <p>延续第 9 章"ZSET 不建议分片、LIST 分片很难不用 Lua"的伏笔，本节实现了一个支持双端阻塞/非阻塞推入弹出的分片 LIST：<code>&lt;listname&gt;:first</code>/<code>&lt;listname&gt;:last</code> 两个 key 记录当前首尾分片 ID，中间分片全部已满，只有首尾分片可能未满。</p>
+
+    <p><strong>明确的 Cluster 限制</strong>：因为分片的具体 key 名字是脚本内部动态算出来的，没法提前通过 KEYS 声明，所以<strong>这个分片 LIST 实现无法分布在 Redis Cluster 的多个节点上，只能跑在单个 Redis 实例内</strong>——这是原书自己在侧栏承认的局限。</p>
+
+    <p>阻塞弹出的实现有一个很有意思的"骗术"：Redis 事务/脚本内部不能真正阻塞（会让整个服务器卡住等待），所以先在脚本里做非阻塞检查，如果确实为空，再单独发一个可能阻塞的 <code>BLPOP</code>/<code>BRPOP</code>，中间insert一个小 Lua 脚本检查分片 ID 是否变化，如果变了就推入一个"哨兵值"让阻塞调用立刻返回而不是傻等。作者坦诚承认这里依然有残余的竞态窗口，"每个系统都有它的局限"。</p>
+
+    <h2>现代示例：Python/Java/TypeScript 调用 Lua 脚本</h2>
+
+    <h3>Python（redis-py 原生 Script 支持，不需要自己写 SHA 缓存包装器）</h3>
+<pre><code class="language-python">import redis
+
+r = redis.Redis(decode_responses=True)
+
+PURCHASE_LUA = """
+local price = tonumber(redis.call('zscore', KEYS[1], ARGV[1]))
+local funds = tonumber(redis.call('hget', KEYS[2], 'funds'))
+if price and funds and funds >= price then
+    redis.call('hincrby', KEYS[3], 'funds', price)
+    redis.call('hincrby', KEYS[2], 'funds', -price)
+    redis.call('sadd', KEYS[4], ARGV[2])
+    redis.call('zrem', KEYS[1], ARGV[1])
+    return true
+end
+return false
+"""
+
+purchase_item = r.register_script(PURCHASE_LUA)  # redis-py 自动管理 SHA 缓存和 NOSCRIPT 回退
+
+def purchase(buyer_id, item_id, seller_id, price):
+    return purchase_item(
+        keys=["market:", f"users:{buyer_id}", f"users:{seller_id}", f"inventory:{buyer_id}"],
+        args=[f"{item_id}.{seller_id}", item_id],
+    )
+</code></pre>
+
+    <h3>Java（Jedis，直接 eval，或用 Redis Functions）</h3>
+<pre><code class="language-java">public boolean purchase(UnifiedJedis jedis, String buyerId, String itemId, String sellerId) {
+    String luaScript = """
+        local price = tonumber(redis.call('zscore', KEYS[1], ARGV[1]))
+        local funds = tonumber(redis.call('hget', KEYS[2], 'funds'))
+        if price and funds and funds >= price then
+            redis.call('hincrby', KEYS[3], 'funds', price)
+            redis.call('hincrby', KEYS[2], 'funds', -price)
+            redis.call('sadd', KEYS[4], ARGV[2])
+            redis.call('zrem', KEYS[1], ARGV[1])
+            return 1
+        end
+        return 0
+        """;
+
+    Object result = jedis.eval(
+        luaScript,
+        List.of("market:", "users:" + buyerId, "users:" + sellerId, "inventory:" + buyerId),
+        List.of(itemId + "." + sellerId, itemId)
+    );
+    return Long.valueOf(1).equals(result);
+}
+</code></pre>
+
+    <h3>TypeScript（ioredis，用 <code>defineCommand</code> 注册可复用命令）</h3>
+<pre><code class="language-typescript">import { Redis } from "ioredis";
+
+const redis = new Redis();
+
+redis.defineCommand("purchaseItem", {
+  numberOfKeys: 4,
+  lua: `
+    local price = tonumber(redis.call('zscore', KEYS[1], ARGV[1]))
+    local funds = tonumber(redis.call('hget', KEYS[2], 'funds'))
+    if price and funds and funds >= price then
+        redis.call('hincrby', KEYS[3], 'funds', price)
+        redis.call('hincrby', KEYS[2], 'funds', -price)
+        redis.call('sadd', KEYS[4], ARGV[2])
+        redis.call('zrem', KEYS[1], ARGV[1])
+        return 1
+    end
+    return 0
+  `,
+});
+
+// @ts-expect-error ioredis 动态注入的方法
+const result = await redis.purchaseItem(
+  "market:", `users:${buyerId}`, `users:${sellerId}`, `inventory:${buyerId}`,
+  `${itemId}.${sellerId}`, itemId,
+);
+</code></pre>
+
+    <h2>现代示例：用 Redis Functions 替代手写 SHA 缓存包装器</h2>
+    <p>Redis 7+ 推荐用 Functions 承载"长期存在"的业务逻辑，注册一次，重启/FLUSH 都不受影响：</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+    subgraph EvalPath["EVAL / EVALSHA（传统方式）"]
+        direction TB
+        E1["客户端首次 EVAL script"] --> E2["Redis 编译并缓存 SHA1"]
+        E2 --> E3["缓存失效时（重启/FLUSH）<br/>NOSCRIPT"]
+        E3 --> E4["客户端必须重新发送完整脚本源码"]
+    end
+    subgraph FuncPath["Redis Functions（7.0+ 推荐）"]
+        direction TB
+        F1["FUNCTION LOAD 一次性注册<br/>一个 Lua 库（可含多个函数）"] --> F2["库随 RDB/AOF 持久化保存"]
+        F2 --> F3["客户端 FCALL purchase_item ..."]
+        F3 --> F4["客户端 FCALL another_func ..."]
+        F2 -.->|"重启 / SCRIPT FLUSH<br/>不受影响"| F2
+    end
+      </div>
+      <figcaption>EVAL 每次缓存失效都要重新传输脚本源码；Redis Functions 把整个库注册一次并持久化，之后所有函数都用轻量的 FCALL 调用，且不受重启或 SCRIPT FLUSH 影响</figcaption>
+    </figure>
+
+<pre><code class="language-lua">#!lua name=marketplace
+
+redis.register_function('purchase_item', function(keys, args)
+    local price = tonumber(redis.call('zscore', keys[1], args[1]))
+    local funds = tonumber(redis.call('hget', keys[2], 'funds'))
+    if price and funds and funds >= price then
+        redis.call('hincrby', keys[3], 'funds', price)
+        redis.call('hincrby', keys[2], 'funds', -price)
+        redis.call('sadd', keys[4], args[2])
+        redis.call('zrem', keys[1], args[1])
+        return 1
+    end
+    return 0
+end)
+</code></pre>
+
+<pre><code class="language-bash">redis-cli -x FUNCTION LOAD < marketplace.lua
+redis-cli FCALL purchase_item 4 market: users:27 users:17 inventory:27 "M.17" "M"
+</code></pre>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书的核心结论——"Lua 脚本能大幅简化代码、大幅提升并发性能，代价是脚本内部访问不到外部系统"——放到今天完全成立，而且有了更好的官方支撑：<strong>Redis Functions 解决了原书第一节手工解决的"脚本缓存失效"问题，让 Lua 方案更适合作为长期业务逻辑存在</strong>。本章展示的三个基准测试（锁、自动补全、市场交易）用真实数字证明了一个反复出现的主题：<strong>能用一次原子脚本解决的问题，通常比"客户端多次往返+重试"更快、更简单</strong>——这是贯穿全书从第 1 章的竞态问题到第 11 章的最终解法的一条主线。</p>
+    </div>
+
+    <h2>附：本章 Listing 对照表</h2>
+    <table>
+      <thead><tr><th>Listing</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td>11.1</td><td><code>script_load()</code> 脚本加载/调用包装器（现代已有官方 Functions/客户端内建支持）</td></tr>
+        <tr><td>11.2–11.3</td><td><code>create_status()</code> 原始版本 vs Lua 版本</td></tr>
+        <tr><td>11.4–11.6</td><td>锁的原始版本 vs Lua 版本（获取/释放）</td></tr>
+        <tr><td>11.7–11.9</td><td>信号量的原始版本 vs Lua 版本</td></tr>
+        <tr><td>11.10–11.11</td><td>自动补全 WATCH 版本 vs Lua 版本</td></tr>
+        <tr><td>11.12–11.13</td><td>市场购买 锁+WATCH 版本 vs Lua 版本</td></tr>
+        <tr><td>11.14–11.16</td><td>分片 LIST 的推入/弹出/阻塞弹出 Lua 实现</td></tr>
+      </tbody>
+    </table>
+
+    <nav class="pagenav">
+      <a href="ch10.html"><span class="dir">上一章</span>第 10 章 扩展 Redis</a>
+      <a href="chA.html"><span class="dir">下一章</span>附录 A 快速搭建环境（现代版）</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>
+</content>

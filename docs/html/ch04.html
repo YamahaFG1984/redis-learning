@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 章 保障数据安全与性能 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 4 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 4 章 保障数据安全与性能</h1>
+    <blockquote><p>对应原书第 4 章 "Keeping data safe and ensuring performance"。这一章原书内容大多是"机制原理"，多数原理至今没变，但周边的工具和默认实践有明显进化，本文重点标注这些变化。</p></blockquote>
+
+    <h2>4.1 持久化：RDB 快照 + AOF</h2>
+
+    <p>Redis 提供两种持久化机制，原书这部分的核心原理<strong>至今完全适用</strong>：</p>
+
+    <ul>
+      <li><strong>快照（RDB）</strong>：某个时间点的全量数据落盘。触发方式：<code>BGSAVE</code>（fork 子进程写盘，不阻塞主进程）、<code>SAVE</code>（阻塞式，全内存都在做快照期间不能处理请求）、配置文件里的 <code>save &lt;秒数&gt; &lt;变更次数&gt;</code> 规则自动触发、<code>SHUTDOWN</code>/收到 TERM 信号时兜底保存一次、以及从库发起全量同步时。</li>
+      <li><strong>AOF（Append-Only File）</strong>：每条写命令都追加写入日志文件，可以完整重放恢复。<code>appendfsync</code> 三个选项：<code>always</code>（每次写都 fsync，最安全但吞吐受限于磁盘）、<code>everysec</code>（每秒 fsync 一次，官方推荐的折中方案）、<code>no</code>（交给操作系统决定，作者明确不推荐）。</li>
+    </ul>
+
+    <p><strong>fork 开销的现实数据</strong>（原书给出的经验值，今天依然是判断依据）：实体机/KVM 上 fork 大约 <strong>10~20ms/GB</strong>；作者当年在 Xen 虚拟化上（那时 AWS EC2 主流是 Xen）实测到 <strong>200~300ms/GB</strong>，50GB 数据 fork 耗时 15 秒以上、快照整体耗时 15~20 分钟，最后不得不改成"每晚 3 点暂停客户端写入 → SAVE → 备份 → 恢复写入"的笨办法。</p>
+
+    <p><strong>现代变化</strong>：</p>
+
+    <ul>
+      <li><strong>AWS 等主流云厂商早已从 Xen 迁移到 KVM/Nitro 虚拟化</strong>，fork 的虚拟化开销问题比 2013 年小得多，但"数据集越大、fork 停顿越长"这个基本规律没有变，<strong>依然建议给 Redis 主节点预留 30~50% 的内存余量</strong>用于 fork 和后台重写。</li>
+      <li><strong>RDB+AOF 混合持久化</strong>（Redis 4.0 起，<code>aof-use-rdb-preamble yes</code>，现在是默认值）：AOF 文件的开头是一份 RDB 格式的全量快照，后面才是增量命令日志——重启加载速度接近纯 RDB，同时保留了 AOF 的低数据丢失窗口。原书完全没有这个机制，因为它是 4.0 之后才引入的。</li>
+      <li><strong>Multi Part AOF</strong>（Redis 7.0 起）：AOF 目录被拆成 base 文件 + 一系列 incr 文件 + manifest 清单文件，<code>BGREWRITEAOF</code> 不再需要整体重写并替换一个巨大单文件，重写/清理更快、更安全。原书里"删除旧 AOF 文件本身可能造成系统卡顿几秒"这个问题，在多文件 AOF 机制下已经大幅缓解。</li>
+      <li>SSD 上 <code>appendfsync always</code> 的写放大问题依然存在，但现代企业级 SSD 的寿命和吞吐相比 2013 年已经好了一个量级，这条建议的紧迫性有所下降，但<strong>仍然不建议在普通云盘上无脑用 always</strong>。</li>
+    </ul>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+    subgraph RDB["RDB 快照"]
+        direction TB
+        R1["触发条件<br/>BGSAVE / save 规则 / SHUTDOWN"] --> R2["fork 子进程"]
+        R2 --> R3["子进程写全量快照到临时文件"]
+        R3 --> R4["写完后原子替换旧 .rdb 文件"]
+    end
+
+    subgraph AOF["AOF 日志"]
+        direction TB
+        A1["每条写命令"] --> A2["追加写入 AOF 缓冲区"]
+        A2 --> A3["按 appendfsync 策略落盘<br/>always / everysec / no"]
+        A3 --> A4["文件增长到阈值<br/>触发 BGREWRITEAOF 重写压缩"]
+    end
+      </div>
+      <figcaption>RDB 快照与 AOF 追加日志：一个是"定期全量拍照"，一个是"持续记流水账"</figcaption>
+    </figure>
+
+    <h2>4.2 复制（Replication）</h2>
+
+    <p>原书用 <code>SLAVEOF host port</code>（或配置文件里的 <code>slaveof</code>）配置主从复制，五步握手过程（连接→<code>SYNC</code>→全量快照传输→追平积压命令→切换实时流）在<strong>协议层面已经被 Redis 2.8 引入的 <code>PSYNC</code>（部分重同步）大幅改进</strong>：</p>
+
+    <ul>
+      <li>原书的 <code>SYNC</code> 只支持全量同步——从库每次重连（哪怕只是短暂网络抖动）都要重新拉一份完整快照。</li>
+      <li><strong><code>PSYNC</code></strong>：主库维护一个复制积压缓冲区（replication backlog），从库短暂断线重连后，只要偏移量还在积压缓冲区范围内，就能做<strong>增量</strong>重同步，不需要重新全量传输。这是这些年复制机制最大的改进，直接解决了原书反复强调的"重连风暴导致带宽耗尽"问题的很大一部分。</li>
+      <li><strong>无盘复制（diskless replication，<code>repl-diskless-sync yes</code>）</strong>：主库可以直接把快照通过 socket 流式传给从库，不需要先落盘再传输，减少了大数据集下的额外磁盘 IO 和延迟。</li>
+      <li><strong><code>REPLICAOF</code></strong>：Redis 5.0 起，<code>SLAVEOF</code>/<code>SLAVEOF NO ONE</code> 的官方新名字是 <code>REPLICAOF</code>/<code>REPLICAOF NO ONE</code>（<code>master</code>/<code>slave</code> 术语逐步替换为 <code>primary</code>/<code>replica</code>），旧命令仍然作为别名保留兼容，但新代码/文档统一用新术语。</li>
+      <li><strong><code>WAIT</code> 命令</strong>（2.8+）：<code>WAIT numreplicas timeout</code> 可以阻塞直到指定数量的副本确认收到了某个写操作——原书为了验证"写是否真的同步到从库/落盘"，手写了一个 <code>wait_for_sync()</code> 轮询函数（生成 UUID 令牌塞进 ZSET，反复轮询从库 <code>INFO</code>）；现代 Redis 有了官方命令，不再需要这种手工轮询。</li>
+    </ul>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant S as 从库 (Replica)
+    participant M as 主库 (Master)
+
+    S->>M: PSYNC replid offset
+    alt 偏移量仍在积压缓冲区内（短暂断线重连）
+        M-->>S: +CONTINUE（部分重同步）
+        M->>S: 只发送积压缓冲区中缺失的增量命令
+    else 首次连接 / 偏移量已失效
+        M-->>S: +FULLRESYNC replid offset
+        M->>S: 传输完整 RDB 快照（可无盘流式传输）
+        S->>S: 加载快照到内存
+    end
+    loop 持续复制
+        M->>S: 实时命令流（写命令）
+        S-->>M: REPLCONF ACK offset
+    end
+      </div>
+      <figcaption>PSYNC 复制握手：能部分重同步就不做全量传输，大幅降低重连开销</figcaption>
+    </figure>
+
+    <p><strong>主主复制依然不支持</strong>：原书明确警告过"Redis 不支持双主复制"，这一点到今天依然成立——Redis 的复制模型永远是树形的单向复制（一个主节点，若干从节点，从节点还可以有自己的从节点），没有 MySQL 那种双主/环形复制模式。如果需要多活写入，应该看 <strong>Redis Enterprise 的 Active-Active（CRDT）</strong> 或应用层自己做冲突消解。</p>
+
+    <h3>Redis Sentinel：从"即将完工"到成熟标配</h3>
+
+    <p>原书写作时特意加了一个提示框："Redis Sentinel 是最近才加入的功能……到本书最终出版时应该已经完成"，并把 Sentinel 的详细使用推迟到第 10 章。<strong>这句话放在今天读格外有意思</strong>——Sentinel 早已是 Redis 高可用的标准组件：监控主从节点健康状态、多个 Sentinel 之间通过 gossip 达成共识、主库失联后自动选举新主、自动把其他从库指向新主、并支持故障切换通知钩子脚本。今天用 Redis 做高可用，Sentinel（或更进一步的 Redis Cluster 自带故障转移）几乎是必选项，不再是"实验性的新东西"。</p>
+
+    <h2>4.3 处理系统故障</h2>
+
+    <ul>
+      <li><strong>校验快照/AOF 完整性</strong>：<code>redis-check-aof --fix</code> 可以截断到第一个损坏命令之前；RDB 快照<strong>没有官方修复工具</strong>（压缩格式导致中间损坏会连累后面全部不可读），作者建议保留多份备份、用 SHA1/SHA256 做校验（而不是 Redis 自带的 CRC64，因为 CRC 类校验和理论上可以被篡改者"配平"，SHA 系列没有已知的等效弱点）。这个建议在今天依然成立，且现代实践通常会进一步用<strong>对象存储的版本控制/不可变备份</strong>（如 S3 Object Lock）来防止备份被覆盖或删除。</li>
+      <li><strong>手动故障转移流程</strong>（原书 Listing 4.4）：SSH 到从库执行 <code>SAVE</code>，<code>scp</code> 快照到新主库，启动新主库，把原从库 <code>SLAVEOF</code> 指向新主库——这套手工流程在 Sentinel/Cluster 普及之后已经很少需要手动做，但理解它有助于理解 Sentinel 自动化了哪些步骤。</li>
+    </ul>
+
+    <h2>4.4 Redis 事务：WATCH/MULTI/EXEC</h2>
+
+    <p>原书用"Fake Game Company"的游戏道具交易市场作为例子：</p>
+
+    <ul>
+      <li><code>market:</code> ZSET，member 是 <code>"&lt;itemid&gt;.&lt;sellerid&gt;"</code>，score 是价格。</li>
+      <li><code>list_item()</code>：<code>WATCH</code> 卖家的 <code>inventory:&lt;id&gt;</code>，确认道具还在，<code>MULTI</code> 里做 <code>ZADD</code> 上架 + <code>SREM</code> 移出库存，<code>EXEC</code> 提交，<code>WatchError</code> 就重试。</li>
+      <li><code>purchase_item()</code>：同时 <code>WATCH</code> <code>market:</code> 和买家的 <code>users:&lt;id&gt;</code>，检查价格没变、余额够，<code>MULTI</code> 里转账 + 转移道具所有权。</li>
+    </ul>
+
+    <p><strong>为什么 Redis 用乐观锁（WATCH）而不是悲观锁</strong>：原书专门用一个侧栏解释——SQL 的 <code>SELECT FOR UPDATE</code> 会让客户端阻塞等待锁释放，Redis 选择让客户端在数据变化时收到通知/自动重试，永远不会阻塞等另一个客户端把事情做完。这个设计哲学至今没变。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant Buyer as 客户端 A（购买者）
+    participant R as Redis
+    participant Other as 客户端 B（并发操作）
+
+    Buyer->>R: WATCH market: users:buyerid
+    R-->>Buyer: OK
+    Buyer->>R: 检查价格 / 余额是否足够
+
+    Other->>R: 并发修改 market:（比如卖家改价/下架）
+    R-->>Other: OK（market: 被修改）
+
+    Buyer->>R: MULTI
+    R-->>Buyer: OK
+    Buyer->>R: ZREM market: item（排队）
+    Buyer->>R: HINCRBY users:buyerid（排队）
+    Buyer->>R: EXEC
+    R-->>Buyer: 返回 nil（事务放弃，因为被 WATCH 的 key 已变化）
+    Buyer->>Buyer: 应用层重新读取最新数据并重试
+      </div>
+      <figcaption>WATCH/MULTI/EXEC 乐观锁：客户端 B 的并发修改导致客户端 A 的事务被放弃，需重试</figcaption>
+    </figure>
+
+    <p><strong>现代替代方案</strong>：这套"WATCH + 重试"模式今天更常被 <strong>Lua 脚本/Redis Functions</strong> 替代——单个脚本天然原子，不需要处理 <code>WatchError</code> 重试逻辑（第 11 章会详细展开，也是原书自己在第 11 章重写这两个函数的理由）。</p>
+
+    <h2>4.5 非事务性 Pipeline</h2>
+
+    <p>原书区分了两种批量发送命令的方式：<code>conn.pipeline(True)</code>（包一层 MULTI/EXEC，事务性）和 <code>conn.pipeline(False)</code>（只是把多条命令打包一次发送，减少网络往返，但不保证原子性）——<strong>MULTI/EXEC 本身也有开销，会阻塞其他客户端的命令</strong>，所以如果不需要原子性，用非事务 pipeline 反而更快。</p>
+
+    <p>原书的实测数据表（<code>update_token()</code> 函数，pipeline vs 不 pipeline）：</p>
+
+    <table>
+      <thead><tr><th>网络环境</th><th>不 pipeline</th><th>pipeline</th></tr></thead>
+      <tbody>
+        <tr><td>本地 Unix socket</td><td>3,761/s</td><td>6,394/s</td></tr>
+        <tr><td>本地 TCP</td><td>3,257/s</td><td>5,991/s</td></tr>
+        <tr><td>同机房远程</td><td>739/s</td><td>2,841/s</td></tr>
+        <tr><td>VPN 跨地域（48ms 延迟）</td><td>3.67/s</td><td>18.2/s</td></tr>
+      </tbody>
+    </table>
+
+    <p>结论：<strong>延迟越高，pipeline 带来的收益越大</strong>（跨地域场景提升近 5 倍），本地场景收益有限，因为瓶颈变成了单核 Python 编解码开销而不是网络。这个结论今天依然成立，且在今天的云环境里（跨可用区/跨区域延迟是常态）比 2013 年更值得重视。</p>
+
+    <h2>4.6 性能诊断</h2>
+
+    <p>原书给出一个至今非常实用的经验法则（Table 4.5）：</p>
+
+    <ul>
+      <li>Python 客户端单连接吞吐通常是 <code>redis-benchmark</code> 单客户端吞吐的 <strong>50%~60%</strong>——这是正常水平。</li>
+      <li>如果只达到 <strong>25%~30%</strong>，或者看到报错 <strong>"Cannot assign requested address"</strong>，几乎可以断定是<strong>每次调用都重新建立连接，而不是复用连接池</strong>。作者说这一条能解释"95% 的性能问题报告"。</li>
+    </ul>
+
+    <p>这条诊断法则放到今天依然是排查 Redis 性能问题的第一步——<strong>连接池配置错误</strong>（尤其是在 Serverless/Lambda 这种每次调用可能冷启动新进程的环境里）仍然是最常见的 Redis 性能坑之一。现代客户端（redis-py、Jedis、ioredis/node-redis）都内置了连接池，但在 Serverless 场景下需要特别小心连接数爆炸的问题，通常建议搭配 <strong>Redis 自带的连接数限制配置</strong> 或者 <strong>Amazon ElastiCache/MemoryDB 之类的托管代理层</strong>。</p>
+
+    <h2>现代实践补充：三语言的连接池与 Pipeline 示例</h2>
+
+    <h3>Python（redis-py，连接池 + pipeline）</h3>
+
+<pre><code class="language-python">import redis
+
+pool = redis.ConnectionPool(host="localhost", port=6379, max_connections=50)
+r = redis.Redis(connection_pool=pool, decode_responses=True)
+
+def update_token_pipeline(token: str, user: str, item: str | None = None):
+    pipe = r.pipeline(transaction=False)  # 非事务 pipeline，只为减少往返
+    pipe.hset("login:", token, user)
+    pipe.zadd("recent:", {token: __import__("time").time()})
+    if item:
+        pipe.zadd(f"viewed:{token}", {item: 0})
+        pipe.zremrangebyrank(f"viewed:{token}", 0, -26)
+        pipe.zincrby("viewed:", -1, item)
+    pipe.execute()
+</code></pre>
+
+    <h3>Java（Jedis 连接池）</h3>
+
+<pre><code class="language-java">import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.Pipeline;
+
+JedisPoolConfig cfg = new JedisPoolConfig();
+cfg.setMaxTotal(50);
+JedisPool pool = new JedisPool(cfg, "localhost", 6379);
+
+try (Jedis jedis = pool.getResource()) {
+    Pipeline pipe = jedis.pipelined();
+    pipe.hset("login:", token, user);
+    pipe.zadd("recent:", System.currentTimeMillis() / 1000.0, token);
+    pipe.sync(); // 一次性发送并等待所有结果
+}
+</code></pre>
+
+    <h3>TypeScript（ioredis 连接池由客户端内部管理，直接用 pipeline）</h3>
+
+<pre><code class="language-typescript">import { Redis } from "ioredis";
+const redis = new Redis({ maxRetriesPerRequest: 3 });
+
+export async function updateTokenPipeline(token: string, user: string, item?: string) {
+  const pipe = redis.pipeline(); // ioredis 的 pipeline 默认就是非事务批量；要事务用 redis.multi()
+  pipe.hset("login:", token, user);
+  pipe.zadd("recent:", Date.now() / 1000, token);
+  if (item) {
+    pipe.zadd(`viewed:${token}`, 0, item);
+    pipe.zremrangebyrank(`viewed:${token}`, 0, -26);
+    pipe.zincrby("viewed:", -1, item);
+  }
+  await pipe.exec();
+}
+</code></pre>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书给出的两条核心结论至今没变：</p>
+      <p>1. 复制 + AOF 是保障数据安全的两大支柱。<br>2. <code>WATCH</code>/<code>MULTI</code>/<code>EXEC</code> 是防止并发客户端互相破坏数据的基础手段（现代实践中很大程度上被 Lua 脚本/Functions 取代，但原理相通）。</p>
+      <p>现代补充的第三条：<strong>Sentinel/Redis Cluster 的自动故障转移，把原书第 4 章"手动 SSH 迁移主库"的应急预案，变成了日常配置的一部分</strong>——理解手工流程仍有价值（尤其是排障时），但生产环境不应该再依赖纯手工故障转移。</p>
+    </div>
+
+    <nav class="pagenav">
+      <a href="ch03.html"><span class="dir">上一章</span>第 3 章 Redis 命令大全</a>
+      <a href="ch05.html"><span class="dir">下一章</span>第 5 章 用 Redis 支撑应用运维</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>
+

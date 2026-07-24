@@ -6,6 +6,8 @@
 - **这些年社区的生产实践**（连接池、缓存击穿防护、分布式锁的正确姿势、Redis Cluster 与本书手工分片方案的对照等）。
 - **Python / Java / TypeScript 三语言示例代码**，Web 框架以 **Django**（Python）和 **Hono.js**（TypeScript）为例。
 
+> **网页版**：`html/` 目录下提供了每一章的 HTML 版本（`html/index.html` 为导航首页），配有 mermaid 流程图/时序图帮助理解数据结构和交互流程，用浏览器打开 `docs/html/index.html` 即可阅读，无需额外构建步骤。
+
 ## 目录
 
 | 章节 | 标题 | 核心内容 |

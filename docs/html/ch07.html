@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 7 章 基于搜索的应用 — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 7 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 7 章 基于搜索的应用</h1>
+    <blockquote><p>对应原书第 7 章 "Search-based applications"，讲了四件事：Redis 里搜索、给搜索结果排序、广告投放、职位搜索。核心手法是用 SET/ZSET 的交并差运算模拟倒排索引和打分系统。</p></blockquote>
+    <blockquote><p>说明：原书目录里"电商市场"相关内容其实在第 4/6 章（<code>list_item</code>/<code>purchase_item</code>），第 7 章本身并没有独立的市场章节，这里只整理第 7 章实际包含的四个主题。</p></blockquote>
+
+    <h2>7.1 在 Redis 里搜索</h2>
+
+    <h3>倒排索引基础</h3>
+    <p>分词（提取字母组成、长度≥2 的词）→去停用词→把每个词映射成一个 SET（<code>ind:&lt;word&gt;</code> → 包含该词的文档 ID 集合）。多词 AND 查询用 <code>SINTER</code>，同义词 OR 查询用 <code>SUNION</code>，排除词用 <code>SDIFF</code>。原书定义了一个简单的查询语法：词前面加 <code>+</code> 表示"是前一个词的同义词"（先分组做并集，再参与最终交集），加 <code>-</code> 表示排除。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    D1["文档 1"] --> Tok["分词 + 去停用词"]
+    D2["文档 2"] --> Tok
+    D3["文档 N"] --> Tok
+    Tok --> W1["SET ind:word1<br/>包含该词的文档 ID"]
+    Tok --> W2["SET ind:word2<br/>包含该词的文档 ID"]
+    Tok --> W3["SET ind:word3<br/>包含该词的文档 ID"]
+    Q["查询: word1 AND word2"] --> Sinter["SINTERSTORE 临时结果<br/>ind:word1 ∩ ind:word2"]
+    W1 --> Sinter
+    W2 --> Sinter
+    Sinter --> Result["匹配的文档 ID 集合"]
+      </div>
+      <figcaption>倒排索引的构建与查询：每个词是一个 SET，多词查询用 SINTERSTORE 求交集</figcaption>
+    </figure>
+
+    <p><strong>现代视角</strong>：这一整套"手写倒排索引"的方法，在今天几乎完全可以被 <strong>RediSearch</strong>（现已作为 <code>FT.*</code> 命令族合入 Redis Stack/Redis 8）替代——<code>FT.CREATE</code> 建索引、<code>FT.SEARCH</code>/<code>FT.AGGREGATE</code> 直接支持全文检索、数值范围、地理位置、向量检索、聚合排序，语法上远比手写 SINTER/SUNION 表达力强，性能也是原生 C 实现。<strong>如果你在 2020 年之后开始一个新项目需要全文搜索，直接用 RediSearch，而不是重新实现本章的手工方案</strong>——但理解手工方案的原理，能帮你理解 RediSearch 内部到底在做什么，以及什么时候手写方案反而更合适（比如极简单的标签过滤，不需要引入整个模块）。</p>
+
+    <h3>SORT 排序结果</h3>
+    <p>用 <code>SORT</code> 引用外部 HASH 字段做排序（<code>BY kb:doc:*->updated</code>），结果集给一个 TTL 做分页缓存。原书点出这个方案的局限——SORT 只能按单一标准排序，这就引出了下一节。</p>
+
+    <h2>7.2 用 ZSET 做排序索引</h2>
+
+    <h3>组合排序：不预先固定权重</h3>
+    <p>核心技巧：<strong>SET 可以直接作为 <code>ZINTERSTORE</code>/<code>ZUNIONSTORE</code> 的输入参数，Redis 把 SET 的每个成员当作分数为 1 的 ZSET 处理</strong>。这样可以把"搜索结果 SET"、"更新时间 ZSET"、"投票数 ZSET"用可调节的权重实时组合，而不需要像第 1 章那样把"每票等于多少分"写死在数据写入时。</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    S["搜索结果 SET<br/>(成员分数视为 1)"] --> Z["ZUNIONSTORE / ZINTERSTORE<br/>按权重组合"]
+    U["更新时间 ZSET"] --> Z
+    V["投票数 ZSET"] --> Z
+    Z --> Final["最终排序 ZSET<br/>score = 加权组合结果"]
+    Final --> Page["ZREVRANGE 分页取结果"]
+      </div>
+      <figcaption>用 ZUNIONSTORE/ZINTERSTORE 把多个 ZSET/SET 按权重实时组合成最终排序结果</figcaption>
+    </figure>
+
+    <h3>非数值排序：字符串转分数</h3>
+    <p>ZSET 分数必须是浮点数，但有时候想按字符串排序（比如按用户名字典序）。原书的技巧：取字符串前 6 个字符，<code>ord()</code> 转数字，用 257 为进制组合成一个数（用 257 而不是 256，是为了给"短字符串填充位"留出区别于"内嵌 null 字节"的空间），最后再乘 2 加一位标志"字符串是否超过 6 个字符"——大约用满 IEEE 754 双精度浮点数的 49 个比特位。</p>
+
+    <p><strong>局限</strong>：字符串转的分数<strong>只能定义一种排序顺序</strong>，不能像数值分数那样和别的分数相加组合（比如不能"字符串排序权重 + 热度权重"）。</p>
+
+    <p><strong>现代视角</strong>：字符串转分数这个技巧本身没有过时（IEEE 754 浮点数精度限制没有变），但如果你需要"按字典序做范围查询"，Redis 早就有更直接的官方命令——<strong><code>ZRANGEBYLEX</code>/<code>ZREVRANGEBYLEX</code></strong>（Redis 2.8.9 起，原书写作时刚发布不久，未收录进本书），专门用来对"所有成员分数相同"的 ZSET 做字典序范围查询，不需要再手工做字符串到数值的转换。第 6 章的公会自动补全场景，用 <code>ZRANGEBYLEX</code> 实现会比原书的"插入哨兵 + WATCH"方案简单得多——这是原书出版后 Redis 官方"追上"手工技巧的一个好例子。</p>
+
+    <h2>7.3 广告投放</h2>
+    <p>这一节作者说是基于自己"实际在生产环境跑过几个月的软件"整理的，含金量很高，是全书最贴近真实工业系统的一节。</p>
+
+    <h3>三种计价模式统一成 eCPM</h3>
+    <ul>
+      <li><strong>CPM</strong>（千次曝光计费）：eCPM = CPM。</li>
+      <li><strong>CPC</strong>（点击计费）：<code>eCPM = 1000 × CPC × 点击率</code>。</li>
+      <li><strong>CPA</strong>（转化计费）：<code>eCPM = 1000 × 点击率 × 转化率 × 单次转化价值</code>。</li>
+    </ul>
+    <p>原始的曝光/点击/转化次数都被完整保存（而不是只存点击率），这样 eCPM 可以随时重新计算。</p>
+
+    <h3>索引与投放</h3>
+    <p><code>index_ad()</code>：把广告加入地域 SET、内容词 ZSET，用系统平均点击率给冷启动广告一个初始 eCPM 估计。<code>target_ads()</code> 的核心流程：地域匹配（union 多个地域 SET 再和全局 eCPM ZSET 相交）→ 内容词加成（每个匹配词都有一个"该词的 eCPM 加成"ZSET）→ 取 eCPM 最高的广告 → 记录本次投放用于学习。</p>
+
+    <p><strong>"数学上不算严谨"的加成算法</strong>（原书自己在侧栏承认）：多个匹配词的加成不能简单相加，但严格算加权平均又做不到（ZSET 之间不能相除），于是采用"取所有匹配词加成的最小值和最大值，各取一半平均"这种权宜之计。作者原话："我选这个方法是因为它好写、好懂、好改进"——这是一个很坦诚的工程态度：<strong>不追求完美算法，先让系统跑起来，用数据反馈迭代</strong>。</p>
+
+    <h3>从用户行为里学习</h3>
+    <p><code>record_targeting_result()</code>/<code>record_click()</code>/<code>update_cpms()</code> 三兄弟：记录曝光/点击/转化 → 定期（每 100 次曝光，或每次点击/转化）重新计算 eCPM 和每个词的加成值。原书结尾列了一串<strong>没有实现、但明确指出方向</strong>的改进点，这些建议放到今天依然是广告系统/推荐系统的入门必修课：</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant U as 用户
+    participant App as 应用服务
+    participant Z as eCPM ZSET
+
+    App->>Z: ZREVRANGE 取 eCPM 最高的广告
+    Z-->>App: 返回候选广告
+    App->>U: 展示广告 (曝光)
+    App->>Z: record_targeting_result() 记录曝光
+    U-->>App: 点击 / 未点击
+    App->>Z: record_click() 记录点击
+    App->>Z: update_cpms() 重新计算 eCPM
+    Note over Z: 每 100 次曝光或每次点击/转化<br/>触发一次 eCPM 重算
+    App->>Z: 下一次 target_ads() 读取最新 eCPM
+      </div>
+      <figcaption>广告投放的 eCPM 学习闭环：展示 → 观察点击 → 更新 ZSET 中的 eCPM → 下次投放读取最新分数</figcaption>
+    </figure>
+
+    <ul>
+      <li>按时间衰减旧数据（老点击率不该永远占权重）。</li>
+      <li>多时间窗口（天/周）加权。</li>
+      <li><strong>二价拍卖</strong>（按第二高出价收费，真实广告网络的标准做法）。</li>
+      <li><strong>探索与利用（exploration vs exploitation）</strong>：不要总是展示 eCPM 最高的广告，否则新广告永远拿不到曝光数据来学习——建议在 Top 100 广告里 10%~50% 的流量做随机采样。这正是<strong>多臂老虎机（multi-armed bandit）</strong>问题的雏形，现代做法通常直接用 Thompson Sampling 或 UCB 算法。</li>
+      <li>冷启动：把全局平均点击率和广告自己的观测点击率按曝光数加权混合，2,000~5,000 次曝光通常足够得到可信的点击率估计。</li>
+      <li>建议把记录曝光/点击这类写操作放到后台异步任务里，不要阻塞广告投放的主流程（复用第 6 章的任务队列思路）。</li>
+    </ul>
+
+    <p><strong>现代视角</strong>：这套"手写 eCPM + ZSET 加成"的广告系统，今天大型广告平台早已升级为基于机器学习的实时竞价系统（在线学习模型、特征工程流水线、向量检索做内容匹配）。但对于中小型系统（站内广告位、优惠券推荐、内容置顶竞价），本章的方法论依然是一个性价比很高的起点——<strong>它不需要机器学习基础设施，纯用 Redis 数据结构就能做到"有反馈闭环的排序系统"</strong>，这是很多创业公司实际会走的第一步。如果要往前演进，下一步通常是引入向量检索（Redis 8 的 <code>VSIM</code>/RediSearch 的向量字段）做内容/用户的语义匹配，或者接入专门的特征存储（Feast 等）。</p>
+
+    <h2>7.4 职位搜索</h2>
+
+    <h3>朴素方案的局限</h3>
+    <p>每个职位一个 SET（存所需技能），要判断候选人是否满足，把候选人技能放进一个临时 SET 求 <code>SDIFF</code>，为空则合格。原书明确说这个方案"没法扩展到查一个候选人能匹配所有职位"，因为要挨个检查每个职位。</p>
+
+    <h3>反过来做（和广告投放的内容加成是同一个技巧）</h3>
+    <p>把索引方向倒过来：每个<strong>技能</strong>一个 SET（存需要它的职位 ID），另一个 ZSET <code>jobs:req</code> 记录每个职位总共需要多少技能。查询时：<code>ZUNIONSTORE</code> 候选人拥有的技能对应的 SET，得到"每个职位匹配了几项技能"；再和 <code>jobs:req</code> 做 <code>ZINTERSTORE</code>（权重 -1 和 1），"匹配技能数 - 所需技能数 = 0" 的职位就是完全匹配的。</p>
+
+    <p>这是本章方法论上最有启发性的一课：<strong>当"从 A 找 B"扩展性不好的时候，试着把索引方向倒过来，从"B 的每个属性值"反向索引出"哪些 A 有这个值"</strong>——这正是搜索引擎倒排索引的核心思想，原书用广告投放（词→广告）和职位搜索（技能→职位）两个场景反复演练了这同一个模式。</p>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>原书这一章的核心结论：Redis 的少量数据结构（加上 pub/sub）本身就是一个完整的工具箱，能撑起搜索、排序、广告投放、职位匹配这些看起来需要"专业中间件"的系统。<strong>现代视角的更新是</strong>：如果搜索/排序需求变复杂（全文相关性、向量语义匹配、大规模聚合），优先考虑 <strong>RediSearch/Redis Stack</strong> 而不是继续手写 SINTER/ZINTERSTORE 拼接方案；但广告投放这类"打分 + 反馈学习"的系统，本章的方法论至今仍是很多实际项目的合理起点。</p>
+    </div>
+
+    <h2>附：Redis 现代能力对照</h2>
+    <table>
+      <thead>
+        <tr><th>原书手工方案</th><th>现代 Redis 能力</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SET 交并差做倒排索引</td><td>RediSearch <code>FT.CREATE</code>/<code>FT.SEARCH</code>（全文检索、数值范围、地理位置）</td></tr>
+        <tr><td>SORT BY 外部 HASH 字段</td><td>依旧可用，但注意 Cluster 模式下不支持跨分片引用</td></tr>
+        <tr><td>字符串转 ZSET 分数</td><td><code>ZRANGEBYLEX</code>（分数相同时按字典序范围查询）</td></tr>
+        <tr><td>手写 eCPM 加成/学习</td><td>可演进为特征存储 + 在线学习模型；探索利用可用 Bandit 算法库</td></tr>
+        <tr><td>技能反向索引</td><td>思路通用，若规模大可交给 RediSearch 的标签/数值字段过滤</td></tr>
+      </tbody>
+    </table>
+
+    <nav class="pagenav">
+      <a href="ch06.html"><span class="dir">上一章</span>第 6 章 构建应用组件</a>
+      <a href="ch08.html"><span class="dir">下一章</span>第 8 章 构建一个简单的社交网络</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

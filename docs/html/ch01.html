@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 认识 Redis — Redis in Action 现代化笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
+  <span class="chapter-badge">第 1 章</span>
+  <span class="spacer"></span>
+</header>
+<div class="layout">
+  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
+  <main>
+    <h1>第 1 章 认识 Redis</h1>
+    <blockquote><p>对应原书第 1 章 "Getting to know Redis"。</p></blockquote>
+
+    <h2>1.0 作者的开场故事</h2>
+    <p>作者提到自己曾把一个跑在 SQL 上的客户联系人搜索系统（6 万行数据，查询要 10~15 秒）用一周时间搬到 Redis 上，响应时间降到 50ms 以内，后续优化后整体提升了约 <strong>200 倍</strong>。这不是虚构的营销话术，而是 Redis 诞生的真实场景——<strong>当你的问题是"频繁地对内存量级的数据做简单读写"时，关系型数据库的通用性反而是负担</strong>。</p>
+
+    <h2>1.1 Redis 是什么</h2>
+    <p>Redis 官方定义在这些年基本没变，但内涵扩充了很多：</p>
+    <ul>
+      <li>2013 年原书的定义：一个非关系型、键值到 5 种数据结构的映射数据库，内存存储 + 可落盘持久化，支持复制做读扩展，客户端分片做写扩展。</li>
+      <li><strong>现代定义（Redis 7.x/8.x）</strong>：Redis 从"5 种数据结构"扩展到了 STRING、LIST、SET、HASH、ZSET、<strong>Stream（消息流，5.0+）</strong>、<strong>HyperLogLog</strong>、<strong>Bitmap/Bitfield</strong>、<strong>Geo（地理位置）</strong>，以及通过 Redis Stack/Redis 8 内置的 <strong>JSON、时序（TimeSeries）、概率数据结构（Bloom/Cuckoo Filter）、全文搜索/向量检索（Search）</strong>。2024 年 Redis 改变了开源协议（转向 RSALv2/SSPLv1 双协议），社区分叉出了 <strong>Valkey</strong>（Linux Foundation 托管，多数云厂商现在默认提供 Valkey）；2025 年 Redis 又宣布回归 AGPLv3 开源。这段协议历史值得了解，但不影响本书讲的核心数据结构和命令语义——Valkey 与 Redis 在协议层几乎完全兼容。</li>
+    </ul>
+    <p>原书对比 Redis 和 memcached/MySQL/PostgreSQL/MongoDB 的表格，放到今天可以这样更新：</p>
+    <table>
+      <thead><tr><th></th><th>Redis（现代）</th><th>Memcached</th><th>PostgreSQL</th><th>MongoDB</th></tr></thead>
+      <tbody>
+        <tr><td>类型</td><td>内存优先，多结构 KV</td><td>内存 KV</td><td>关系型</td><td>文档型</td></tr>
+        <tr><td>结构</td><td>String/List/Set/Hash/ZSet/Stream/JSON/Bitmap/Geo/概率结构</td><td>只有字符串</td><td>表</td><td>文档（JSON-like）</td></tr>
+        <tr><td>持久化</td><td>RDB + AOF（可混合）、副本、Redis Cluster</td><td>无</td><td>WAL</td><td>Journal + 副本集</td></tr>
+        <tr><td>扩展能力</td><td>Lua 脚本、Redis Functions、模块（Search/JSON/TimeSeries）</td><td>无</td><td>存储过程、扩展</td><td>聚合管道</td></tr>
+      </tbody>
+    </table>
+    <p><strong>为什么不用 memcached？</strong> memcached 只有字符串，想实现"列表"得自己拼字符串再解析；Redis 原生提供 5+ 种结构，代码更短、更快、更不容易出错。<strong>为什么不用关系型数据库？</strong> 关系型数据库擅长"插入新行"（顺序写盘），不擅长"频繁更新同一行的聚合值"（随机 IO）；Redis 直接在内存里原子自增，没有 SQL 解析/优化器开销。</p>
+
+    <h2>1.2 五（现在是十几）种数据结构长什么样</h2>
+    <p>原书的 Table 1.2（STRING/LIST/SET/HASH/ZSET）依然是 Redis 的核心心智模型，值得先吃透再往下学：</p>
+    <table>
+      <thead><tr><th>结构</th><th>存的是什么</th><th>典型命令</th></tr></thead>
+      <tbody>
+        <tr><td>STRING</td><td>字符串/整数/浮点数</td><td>GET/SET/INCR/APPEND</td></tr>
+        <tr><td>LIST</td><td>允许重复元素的有序链表</td><td>LPUSH/RPUSH/LRANGE/LPOP</td></tr>
+        <tr><td>SET</td><td>无序不重复字符串集合</td><td>SADD/SMEMBERS/SINTER</td></tr>
+        <tr><td>HASH</td><td>字段→值的映射</td><td>HSET/HGET/HGETALL</td></tr>
+        <tr><td>ZSET</td><td>带分数、按分数排序的唯一成员集合</td><td>ZADD/ZRANGE/ZRANGEBYSCORE</td></tr>
+      </tbody>
+    </table>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    R[("Redis")]
+    R --> S["STRING<br/>计数器 / 缓存值"]
+    R --> L["LIST<br/>消息队列 / 时间线"]
+    R --> SE["SET<br/>标签 / 去重"]
+    R --> H["HASH<br/>对象字段存储"]
+    R --> Z["ZSET<br/>排行榜 / 带分数排序"]
+      </div>
+      <figcaption>Redis 五种核心数据结构一览，及各自最典型的应用场景</figcaption>
+    </figure>
+
+    <p><strong>现代补充的结构</strong>（原书完全没有，但今天写 Redis 应用几乎绕不开）：</p>
+    <ul>
+      <li><strong>Bitmap</strong>（<code>SETBIT</code>/<code>GETBIT</code>/<code>BITCOUNT</code>/<code>BITOP</code>，本质是 STRING）：签到、布尔标记位图。</li>
+      <li><strong>HyperLogLog</strong>（<code>PFADD</code>/<code>PFCOUNT</code>/<code>PFMERGE</code>）：用 12KB 固定内存估算海量数据的基数（去重计数），误差率 &lt;1%。</li>
+      <li><strong>Geo</strong>（<code>GEOADD</code>/<code>GEOSEARCH</code>，本质是 ZSET + geohash 编码）：附近的人/门店。</li>
+      <li><strong>Stream</strong>（<code>XADD</code>/<code>XREAD</code>/<code>XREADGROUP</code>，Redis 5.0+）：真正的消息队列，带消费组、ACK、持久化游标——这几乎完全取代了原书第 6 章手写队列/pub-sub 消息投递的必要性。</li>
+      <li><strong>JSON</strong>（<code>JSON.SET</code>/<code>JSON.GET</code>，Redis Stack/Redis 8 内置）：直接在 Redis 里存嵌套 JSON 并按路径读写，一定程度回应了原书 2.4 节"Redis 不支持嵌套结构"这个长期痛点。</li>
+      <li><strong>HASH 字段级 TTL</strong>（<code>HEXPIRE</code>/<code>HPERSIST</code>，Redis 7.4+）：给 HASH 里的单个字段设置过期时间。</li>
+    </ul>
+
+    <h2>1.3 Hello Redis：一个投票系统</h2>
+    <p>原书用一个 Reddit/Hacker News 风格的文章投票系统贯穿全章，这是学 Redis 最经典的入门案例，建议动手实现一遍。</p>
+
+    <h3>数据建模</h3>
+    <ul>
+      <li><code>article:&lt;id&gt;</code>：HASH，存 <code>title</code>/<code>link</code>/<code>poster</code>/<code>time</code>/<code>votes</code>。</li>
+      <li><code>score:</code>：ZSET，member 是 <code>article:&lt;id&gt;</code>，score 是"发布时间 + 每票 432 分"算出来的热度分。</li>
+      <li><code>time:</code>：ZSET，member 同上，score 是发布时间，用于"按最新排序"。</li>
+      <li><code>voted:&lt;id&gt;</code>：SET，记录谁投过票，防止重复投票，一周后过期。</li>
+    </ul>
+    <p><strong>432 这个数字怎么来的</strong>：作者希望 200 票能让文章获得大约"一天"的热度加成，<code>86400 秒 ÷ 200 票 = 432 分/票</code>。这是一个很好的例子——<strong>分数不是拍脑袋定的，是从业务目标反推出来的</strong>。</p>
+
+    <h3>投票逻辑（原书 Listing 1.6）</h3>
+<pre><code class="language-python">def article_vote(conn, user, article):
+    cutoff = time.time() - ONE_WEEK_IN_SECONDS
+    if conn.zscore('time:', article) &lt; cutoff:
+        return
+    article_id = article.partition(':')[-1]
+    if conn.sadd('voted:' + article_id, user):
+        conn.zincrby('score:', article, VOTE_SCORE)
+        conn.hincrby(article, 'votes', 1)
+</code></pre>
+    <p>原书自己承认这里有个正确性问题：<code>SADD</code>（记录投票人）和后面的 <code>ZINCRBY</code>/<code>HINCRBY</code>（加分）不是原子的一整体——理论上可能在两步之间崩溃，导致"记录了投票人但分数没加"。这个问题第 3、4 章才会用 <code>WATCH</code>/<code>MULTI</code>/<code>EXEC</code> 解决。</p>
+    <blockquote><p><strong>现代做法</strong>：今天写这段逻辑，直接建议用 <strong>Lua 脚本或 Redis Function</strong> 把"检查时间窗 + SADD + ZINCRBY + HINCRBY"打包成一个原子操作（第 11 章会系统讲 Lua）。这是原书埋下的伏笔，也是贯穿全书的一条主线——从"多步操作的竞态"到"Lua 原子脚本"的演进。</p></blockquote>
+
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+    participant U as 用户
+    participant App as 应用
+    participant R as Redis
+    U->>App: 点击投票
+    App->>R: SADD voted:&lt;id&gt; user
+    R-->>App: 是否首次投票
+    App->>R: ZINCRBY score: 432 article
+    App->>R: HINCRBY article votes 1
+    U->>App: 打开首页
+    App->>R: ZREVRANGE score: 0 24
+    R-->>App: 按热度排序的文章 ID 列表
+    App-->>U: 渲染排行榜页面
+      </div>
+      <figcaption>从点击投票到首页排行榜展示的完整数据流：ZINCRBY 更新热度分，HASH 存文章数据，ZREVRANGE 读取排名</figcaption>
+    </figure>
+
+    <h3>现代 Redis 客户端代码（三语言）</h3>
+    <p><strong>Python（redis-py）</strong></p>
+<pre><code class="language-python">import time
+import redis
+
+r = redis.Redis(decode_responses=True)
+
+ONE_WEEK = 7 * 86400
+VOTE_SCORE = 432
+
+def article_vote(user: str, article: str):
+    cutoff = time.time() - ONE_WEEK
+    if r.zscore("time:", article) is None or r.zscore("time:", article) &lt; cutoff:
+        return
+    article_id = article.partition(":")[-1]
+    if r.sadd(f"voted:{article_id}", user):
+        r.zincrby("score:", VOTE_SCORE, article)  # 注意：现代 zincrby 是 (name, amount, value)
+        r.hincrby(article, "votes", 1)
+
+def post_article(user: str, title: str, link: str) -> str:
+    article_id = str(r.incr("article:"))
+    voted_key = f"voted:{article_id}"
+    r.sadd(voted_key, user)
+    r.expire(voted_key, ONE_WEEK)
+
+    now = time.time()
+    article = f"article:{article_id}"
+    r.hset(article, mapping={
+        "title": title, "link": link, "poster": user,
+        "time": now, "votes": 1,
+    })
+    r.zadd("score:", {article: now + VOTE_SCORE})
+    r.zadd("time:", {article: now})
+    return article_id
+</code></pre>
+    <blockquote><p>对比原书：原书 <code>conn.hmset(article, {...})</code> 用的是 <code>HMSET</code>——Redis 4.0 起 <code>HSET</code> 本身就支持一次写多个字段，<code>HMSET</code> 已被标记为 deprecated，新代码应该直接用 <code>HSET</code>。<code>conn.zadd('score:', article, now + VOTE_SCORE)</code> 是老版 redis-py 的位置参数写法，现代 redis-py 要求 <code>zadd(name, {member: score})</code> 字典形式。</p></blockquote>
+
+    <p><strong>Java（Jedis）</strong></p>
+<pre><code class="language-java">import redis.clients.jedis.UnifiedJedis;
+import java.util.HashMap;
+import java.util.Map;
+
+public class ArticleVoting {
+    static final long ONE_WEEK = 7 * 86400L;
+    static final double VOTE_SCORE = 432;
+
+    public static void articleVote(UnifiedJedis jedis, String user, String article) {
+        Double postTime = jedis.zscore("time:", article);
+        if (postTime == null || postTime &lt; System.currentTimeMillis() / 1000.0 - ONE_WEEK) return;
+        String articleId = article.split(":")[1];
+        if (jedis.sadd("voted:" + articleId, user) == 1) {
+            jedis.zincrby("score:", VOTE_SCORE, article);
+            jedis.hincrBy(article, "votes", 1);
+        }
+    }
+
+    public static String postArticle(UnifiedJedis jedis, String user, String title, String link) {
+        String articleId = String.valueOf(jedis.incr("article:"));
+        String votedKey = "voted:" + articleId;
+        jedis.sadd(votedKey, user);
+        jedis.expire(votedKey, ONE_WEEK);
+
+        double now = System.currentTimeMillis() / 1000.0;
+        String article = "article:" + articleId;
+        Map&lt;String, String&gt; fields = new HashMap&lt;&gt;();
+        fields.put("title", title);
+        fields.put("link", link);
+        fields.put("poster", user);
+        fields.put("time", String.valueOf(now));
+        fields.put("votes", "1");
+        jedis.hset(article, fields);
+        jedis.zadd("score:", now + VOTE_SCORE, article);
+        jedis.zadd("time:", now, article);
+        return articleId;
+    }
+}
+</code></pre>
+
+    <p><strong>TypeScript（ioredis）</strong></p>
+<pre><code class="language-typescript">import { Redis } from "ioredis";
+const redis = new Redis();
+
+const ONE_WEEK = 7 * 86400;
+const VOTE_SCORE = 432;
+
+export async function articleVote(user: string, article: string) {
+  const postTime = await redis.zscore("time:", article);
+  if (postTime === null || Number(postTime) &lt; Date.now() / 1000 - ONE_WEEK) return;
+
+  const articleId = article.split(":")[1];
+  const added = await redis.sadd(`voted:${articleId}`, user);
+  if (added) {
+    await redis.zincrby("score:", VOTE_SCORE, article);
+    await redis.hincrby(article, "votes", 1);
+  }
+}
+
+export async function postArticle(user: string, title: string, link: string) {
+  const articleId = String(await redis.incr("article:"));
+  const votedKey = `voted:${articleId}`;
+  await redis.sadd(votedKey, user);
+  await redis.expire(votedKey, ONE_WEEK);
+
+  const now = Date.now() / 1000;
+  const article = `article:${articleId}`;
+  await redis.hset(article, { title, link, poster: user, time: now, votes: 1 });
+  await redis.zadd("score:", now + VOTE_SCORE, article);
+  await redis.zadd("time:", now, article);
+  return articleId;
+}
+</code></pre>
+
+    <h3>分页取文章（原书 Listing 1.8）</h3>
+    <p>原书用 <code>ZREVRANGE</code>（按排名取一段，不是按分数）取一页文章 ID，再挨个 <code>HGETALL</code>。这里有个原书文字和代码不一致的小细节：正文说的是 <code>ZREVRANGEBYSCORE</code>，但代码实际用的是 <code>ZREVRANGE</code>——<strong>如果你对照原书排查问题，记得代码才是准的</strong>。</p>
+    <p>现代写法应该用 pipeline 把"批量 HGETALL"合并成一次网络往返（原书自己在第 3 章把这个当成一道练习题留给读者）：</p>
+<pre><code class="language-python">def get_articles(page: int = 1, order: str = "score:", per_page: int = 25):
+    start = (page - 1) * per_page
+    ids = r.zrevrange(order, start, start + per_page - 1)
+    pipe = r.pipeline()
+    for aid in ids:
+        pipe.hgetall(aid)
+    rows = pipe.execute()
+    return [dict(row, id=aid) for aid, row in zip(ids, rows) if row]
+</code></pre>
+
+    <h3>文章分组（原书 Listing 1.9/1.10）</h3>
+    <p>用 <code>SADD</code>/<code>SREM</code> 把文章加入/移出 <code>group:&lt;name&gt;</code> 这个 SET，查询某个分组下按热度排序的文章时，用 <code>ZINTERSTORE</code>（<code>aggregate='max'</code>）把 <code>group:&lt;name&gt;</code> 和 <code>score:</code> 相交，结果缓存 60 秒（<code>EXPIRE</code>）。</p>
+    <p>作者在这里点出一个很朴素但常被忽视的设计原则：<strong>如果一篇文章只属于一两个分组，直接把分组存进文章的 HASH、每次投票顺手 <code>ZINCRBY</code> 那一两个分组的分数就够了；但如果文章可能属于任意多个分组，每次投票都全量更新所有分组的分数代价太高，所以改成"定期重新计算"而不是"实时增量更新"</strong>——这是一个通用的权衡：<strong>实时精确 vs 定期批量重算</strong>，贯穿几乎所有排行榜/统计类系统的设计。</p>
+
+    <h2>1.4 命令速查与获取帮助</h2>
+    <p>原书建议查 <code>redis.io/commands</code>，现代等价的是 <strong>redis.io/commands</strong>（官方文档持续维护，附带每个版本引入/废弃的标注）以及 <code>redis-cli --help</code>/<code>COMMAND DOCS</code>（Redis 7+ 支持在命令行里直接查文档）。</p>
+
+    <h2>1.5 本章小结</h2>
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>Redis 是工具，不是银弹。它的核心差异化在于：内存（快）、远程（可被多进程/多机共享）、持久化（能扛重启）、可扩展（复制/分片）。原书希望读者从"如何把数据塞进表和行"转变为"哪种 Redis 结构最适合这个问题"——这个心智模型转变到今天依然是学 Redis 的第一课，比任何具体命令都重要。</p>
+    </div>
+
+    <h2>附：本章 Listing 对照表</h2>
+    <table>
+      <thead><tr><th>Listing</th><th>内容</th><th>源码函数</th></tr></thead>
+      <tbody>
+        <tr><td>1.1–1.5</td><td>STRING/LIST/SET/HASH/ZSET 基本命令演示（redis-cli 交互）</td><td>仅文档字符串，非独立函数</td></tr>
+        <tr><td>1.6</td><td><code>article_vote()</code> 投票逻辑</td><td><code>article_vote</code></td></tr>
+        <tr><td>1.7</td><td><code>post_article()</code> 发布文章</td><td><code>post_article</code></td></tr>
+        <tr><td>1.8</td><td><code>get_articles()</code> 分页取文章</td><td><code>get_articles</code></td></tr>
+        <tr><td>1.9</td><td><code>add_remove_groups()</code> 分组增删</td><td><code>add_remove_groups</code></td></tr>
+        <tr><td>1.10</td><td><code>get_group_articles()</code> 按分组查询（带 60s 缓存）</td><td><code>get_group_articles</code></td></tr>
+      </tbody>
+    </table>
+
+    <nav class="pagenav">
+      <span class="placeholder">·</span>
+      <a href="ch02.html"><span class="dir">下一章</span>第 2 章 剖析一个 Redis Web 应用</a>
+    </nav>
+  </main>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>
