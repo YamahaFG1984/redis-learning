@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 12 章（补充）安全与访问控制 — Redis in Action 现代化笔记</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23d92d20'/%3E%3Ctext x='50' y='69' font-size='56' font-family='Arial, sans-serif' font-weight='700' fill='white' text-anchor='middle'%3ER%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/style.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
@@ -16,15 +20,35 @@
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
-  <span class="chapter-badge">第 12 章 · 补充</span>
-  <span class="spacer"></span>
-</header>
-<div class="layout">
-  <aside class="toc"><h2>本页目录</h2><ul id="toc-list"></ul></aside>
-  <main>
-    <h1>第 12 章（补充）安全与访问控制</h1>
+<button class="nav-toggle" id="navToggle" aria-label="打开章节目录"><span></span><span></span><span></span></button>
+<div class="nav-backdrop" id="navBackdrop"></div>
+<div class="shell">
+  <nav class="sidenav" id="sidenav">
+  <a class="sidenav-brand" href="index.html"><span class="title">Redis in Action</span><span class="subtitle">现代化学习笔记</span></a>
+  <div class="sidenav-label">原书章节</div>
+  <a class="sidenav-link" href="ch01.html"><span class="n">01</span><span>认识 Redis</span></a>
+  <a class="sidenav-link" href="ch02.html"><span class="n">02</span><span>剖析一个 Redis Web 应用</span></a>
+  <a class="sidenav-link" href="ch03.html"><span class="n">03</span><span>Redis 命令大全</span></a>
+  <a class="sidenav-link" href="ch04.html"><span class="n">04</span><span>保障数据安全与性能</span></a>
+  <a class="sidenav-link" href="ch05.html"><span class="n">05</span><span>用 Redis 支撑应用运维</span></a>
+  <a class="sidenav-link" href="ch06.html"><span class="n">06</span><span>构建应用组件</span></a>
+  <a class="sidenav-link" href="ch07.html"><span class="n">07</span><span>基于搜索的应用</span></a>
+  <a class="sidenav-link" href="ch08.html"><span class="n">08</span><span>构建一个简单的社交网络</span></a>
+  <a class="sidenav-link" href="ch09.html"><span class="n">09</span><span>降低内存占用</span></a>
+  <a class="sidenav-link" href="ch10.html"><span class="n">10</span><span>扩展 Redis</span></a>
+  <a class="sidenav-link" href="ch11.html"><span class="n">11</span><span>用 Lua 给 Redis 写脚本</span></a>
+  <a class="sidenav-link" href="chA.html"><span class="n">A</span><span>快速搭建环境（现代版）</span></a>
+  <div class="sidenav-label">补充章节</div>
+  <a class="sidenav-link" href="ch12.html"><span class="n">12</span><span>安全与访问控制</span></a>
+  <a class="sidenav-link" href="ch13.html"><span class="n">13</span><span>用 Redis 做限流</span></a>
+  <a class="sidenav-link" href="ch14.html"><span class="n">14</span><span>可观测性与生产排障</span></a>
+  <a class="sidenav-link" href="ch15.html"><span class="n">15</span><span>Redis 与 AI 应用</span></a>
+  </nav>
+  <main class="content">
+    <div class="content-inner">
+      <article>
+      <span class="eyebrow">第 12 章 · 补充</span>
+<h1>第 12 章（补充）安全与访问控制</h1>
     <blockquote><p>本章是原书没有覆盖的内容。《Redis in Action》写于 2013 年，当时 Redis 的安全模型极其简陋——一个全局密码（<code>requirepass</code>），要么全权限访问，要么什么都不能做。这些年 Redis 的安全能力有了质的飞跃，本章按现代实践重新梳理。</p></blockquote>
 
     <h2>12.0 为什么原书完全没讲安全</h2>
@@ -205,7 +229,13 @@ const redis = new Redis({
       <a href="chA.html"><span class="dir">上一章</span>快速搭建环境（现代版）</a>
       <a href="ch13.html"><span class="dir">下一章</span>用 Redis 做限流</a>
     </nav>
+      </article>
+    </div>
   </main>
+  <aside class="page-toc">
+    <div class="page-toc-label">本页目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
 </div>
 <script src="assets/page.js" defer></script>
 </body>

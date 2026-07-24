@@ -4,119 +4,158 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Redis in Action 现代化笔记</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23d92d20'/%3E%3Ctext x='50' y='69' font-size='56' font-family='Arial, sans-serif' font-weight='700' fill='white' text-anchor='middle'%3ER%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="index.html">Redis in Action 现代化笔记</a>
-</header>
+<button class="nav-toggle" id="navToggle" aria-label="打开章节目录"><span></span><span></span><span></span></button>
+<div class="nav-backdrop" id="navBackdrop"></div>
+<div class="shell">
+  <nav class="sidenav" id="sidenav">
+  <a class="sidenav-brand" href="index.html"><span class="title">Redis in Action</span><span class="subtitle">现代化学习笔记</span></a>
+  <div class="sidenav-label">原书章节</div>
+  <a class="sidenav-link" href="ch01.html"><span class="n">01</span><span>认识 Redis</span></a>
+  <a class="sidenav-link" href="ch02.html"><span class="n">02</span><span>剖析一个 Redis Web 应用</span></a>
+  <a class="sidenav-link" href="ch03.html"><span class="n">03</span><span>Redis 命令大全</span></a>
+  <a class="sidenav-link" href="ch04.html"><span class="n">04</span><span>保障数据安全与性能</span></a>
+  <a class="sidenav-link" href="ch05.html"><span class="n">05</span><span>用 Redis 支撑应用运维</span></a>
+  <a class="sidenav-link" href="ch06.html"><span class="n">06</span><span>构建应用组件</span></a>
+  <a class="sidenav-link" href="ch07.html"><span class="n">07</span><span>基于搜索的应用</span></a>
+  <a class="sidenav-link" href="ch08.html"><span class="n">08</span><span>构建一个简单的社交网络</span></a>
+  <a class="sidenav-link" href="ch09.html"><span class="n">09</span><span>降低内存占用</span></a>
+  <a class="sidenav-link" href="ch10.html"><span class="n">10</span><span>扩展 Redis</span></a>
+  <a class="sidenav-link" href="ch11.html"><span class="n">11</span><span>用 Lua 给 Redis 写脚本</span></a>
+  <a class="sidenav-link" href="chA.html"><span class="n">A</span><span>快速搭建环境（现代版）</span></a>
+  <div class="sidenav-label">补充章节</div>
+  <a class="sidenav-link" href="ch12.html"><span class="n">12</span><span>安全与访问控制</span></a>
+  <a class="sidenav-link" href="ch13.html"><span class="n">13</span><span>用 Redis 做限流</span></a>
+  <a class="sidenav-link" href="ch14.html"><span class="n">14</span><span>可观测性与生产排障</span></a>
+  <a class="sidenav-link" href="ch15.html"><span class="n">15</span><span>Redis 与 AI 应用</span></a>
+  </nav>
 
-<section class="hero">
-  <h1>《Redis in Action》现代化学习笔记</h1>
-  <p>
-    本站基于 Josiah Carlson 所著《Redis in Action》（2013，Manning）整理而成。原书基于 <strong>Redis 2.6 + Python 2</strong> 编写，
-    本笔记在忠实还原原书设计思路、数据结构选型和踩坑经验的基础上，补充了：
-  </p>
-  <ul>
-    <li><strong>现代 Redis（7.x / 8.x，以及 Valkey）的等价能力和命令变化</strong>（listpack 替代 ziplist、Redis Functions 替代手写脚本缓存、Streams 替代手工消息队列、HyperLogLog 替代手工基数估算、HASH 字段级 TTL 等）。</li>
-    <li><strong>这些年社区的生产实践</strong>（连接池、缓存击穿防护、分布式锁的正确姿势、Redis Cluster 与本书手工分片方案的对照等）。</li>
-    <li><strong>Python / Java / TypeScript 三语言示例代码</strong>，Web 框架以 <strong>Django</strong>（Python）和 <strong>Hono.js</strong>（TypeScript）为例。</li>
-    <li><strong>原书未覆盖的 4 个补充章节</strong>：安全与访问控制、限流、可观测性与生产排障、Redis 与 AI 应用（向量检索）。</li>
-  </ul>
-  <p>每章都配有 mermaid 流程图/时序图，帮助理解数据结构和交互流程，而不只是读命令列表。</p>
-</section>
+  <main class="content wide">
+    <div class="content-inner">
+      <section class="hero">
+        <h1>《Redis in Action》现代化学习笔记</h1>
+        <p class="hero-lede">
+          基于 Josiah Carlson 所著《Redis in Action》（2013，Manning）整理。原书基于 <strong>Redis 2.6 + Python 2</strong> 编写，
+          本笔记忠实还原原书设计思路、数据结构选型和踩坑经验，同时补上这十几年 Redis 本身与社区实践的演进。
+        </p>
 
-<h2 class="section-label">原书章节</h2>
-<div class="chapter-grid">
-  <a class="chapter-card" href="ch01.html">
-    <span class="num">第 1 章</span>
-    <div class="title">认识 Redis</div>
-    <div class="desc">五种基础数据结构、文章投票系统入门案例</div>
-  </a>
-  <a class="chapter-card" href="ch02.html">
-    <span class="num">第 2 章</span>
-    <div class="title">剖析一个 Redis Web 应用</div>
-    <div class="desc">登录会话、购物车、页面缓存、行缓存、访问分析</div>
-  </a>
-  <a class="chapter-card" href="ch03.html">
-    <span class="num">第 3 章</span>
-    <div class="title">Redis 命令大全</div>
-    <div class="desc">STRING/LIST/SET/HASH/ZSET/Pub-Sub/SORT/事务/过期，逐命令现代化标注</div>
-  </a>
-  <a class="chapter-card" href="ch04.html">
-    <span class="num">第 4 章</span>
-    <div class="title">保障数据安全与性能</div>
-    <div class="desc">RDB/AOF 持久化、主从复制、WATCH/MULTI/EXEC、Pipeline、性能诊断</div>
-  </a>
-  <a class="chapter-card" href="ch05.html">
-    <span class="num">第 5 章</span>
-    <div class="title">用 Redis 支撑应用运维</div>
-    <div class="desc">日志、多精度计数器与统计、IP 归属地查询、服务发现与配置中心</div>
-  </a>
-  <a class="chapter-card" href="ch06.html">
-    <span class="num">第 6 章</span>
-    <div class="title">构建应用组件</div>
-    <div class="desc">自动补全、分布式锁、计数信号量、任务队列、可靠消息投递、文件分发</div>
-  </a>
-  <a class="chapter-card" href="ch07.html">
-    <span class="num">第 7 章</span>
-    <div class="title">基于搜索的应用</div>
-    <div class="desc">倒排索引、ZSET 组合排序、广告投放（eCPM 学习）、职位搜索</div>
-  </a>
-  <a class="chapter-card" href="ch08.html">
-    <span class="num">第 8 章</span>
-    <div class="title">构建一个简单的社交网络</div>
-    <div class="desc">用户/状态、时间线、关注关系、发帖扇出策略、流式 API</div>
-  </a>
-  <a class="chapter-card" href="ch09.html">
-    <span class="num">第 9 章</span>
-    <div class="title">降低内存占用</div>
-    <div class="desc">紧凑结构编码（ziplist→listpack）、分片结构、位打包</div>
-  </a>
-  <a class="chapter-card" href="ch10.html">
-    <span class="num">第 10 章</span>
-    <div class="title">扩展 Redis</div>
-    <div class="desc">只读从库、可写查询从库、手工分片方案与 Redis Cluster 的对照</div>
-  </a>
-  <a class="chapter-card" href="ch11.html">
-    <span class="num">第 11 章</span>
-    <div class="title">用 Lua 给 Redis 写脚本</div>
-    <div class="desc">EVAL/EVALSHA、锁/信号量/自动补全/交易的 Lua 重写、Redis Functions</div>
-  </a>
-  <a class="chapter-card" href="chA.html">
-    <span class="num">附录 A</span>
-    <div class="title">快速搭建环境（现代版）</div>
-    <div class="desc">Docker/APT/Homebrew 安装、Django 与 Hono.js 接入示例</div>
-  </a>
+        <div class="stat-row">
+          <div class="stat"><span class="num">16</span><span class="label">章节</span></div>
+          <div class="stat"><span class="num">44</span><span class="label">流程/时序图</span></div>
+          <div class="stat"><span class="num">3</span><span class="label">语言示例代码</span></div>
+          <div class="stat"><span class="num">4</span><span class="label">原书未覆盖的新章节</span></div>
+        </div>
+
+        <ul class="feature-list">
+          <li><strong>现代 Redis（7.x / 8.x，以及 Valkey）的等价能力和命令变化</strong>——listpack 替代 ziplist、Redis Functions 替代手写脚本缓存、Streams 替代手工消息队列、HyperLogLog 替代手工基数估算、HASH 字段级 TTL 等。</li>
+          <li><strong>这些年社区的生产实践</strong>——连接池、缓存击穿防护、分布式锁的正确姿势、Redis Cluster 与本书手工分片方案的对照等。</li>
+          <li><strong>Python / Java / TypeScript 三语言示例代码</strong>，Web 框架以 <strong>Django</strong>（Python）和 <strong>Hono.js</strong>（TypeScript）为例。</li>
+          <li><strong>原书未覆盖的 4 个补充章节</strong>：安全与访问控制、限流、可观测性与生产排障、Redis 与 AI 应用（向量检索）。</li>
+        </ul>
+        <p class="hero-lede">每章都配有 mermaid 流程图/时序图，帮助理解数据结构和交互流程，而不只是读命令列表。</p>
+      </section>
+
+      <h2 class="section-label">原书章节</h2>
+      <div class="chapter-grid">
+        <a class="chapter-card" href="ch01.html">
+          <span class="num">第 1 章</span>
+          <div class="title">认识 Redis</div>
+          <div class="desc">五种基础数据结构、文章投票系统入门案例</div>
+        </a>
+        <a class="chapter-card" href="ch02.html">
+          <span class="num">第 2 章</span>
+          <div class="title">剖析一个 Redis Web 应用</div>
+          <div class="desc">登录会话、购物车、页面缓存、行缓存、访问分析</div>
+        </a>
+        <a class="chapter-card" href="ch03.html">
+          <span class="num">第 3 章</span>
+          <div class="title">Redis 命令大全</div>
+          <div class="desc">STRING/LIST/SET/HASH/ZSET/Pub-Sub/SORT/事务/过期，逐命令现代化标注</div>
+        </a>
+        <a class="chapter-card" href="ch04.html">
+          <span class="num">第 4 章</span>
+          <div class="title">保障数据安全与性能</div>
+          <div class="desc">RDB/AOF 持久化、主从复制、WATCH/MULTI/EXEC、Pipeline、性能诊断</div>
+        </a>
+        <a class="chapter-card" href="ch05.html">
+          <span class="num">第 5 章</span>
+          <div class="title">用 Redis 支撑应用运维</div>
+          <div class="desc">日志、多精度计数器与统计、IP 归属地查询、服务发现与配置中心</div>
+        </a>
+        <a class="chapter-card" href="ch06.html">
+          <span class="num">第 6 章</span>
+          <div class="title">构建应用组件</div>
+          <div class="desc">自动补全、分布式锁、计数信号量、任务队列、可靠消息投递、文件分发</div>
+        </a>
+        <a class="chapter-card" href="ch07.html">
+          <span class="num">第 7 章</span>
+          <div class="title">基于搜索的应用</div>
+          <div class="desc">倒排索引、ZSET 组合排序、广告投放（eCPM 学习）、职位搜索</div>
+        </a>
+        <a class="chapter-card" href="ch08.html">
+          <span class="num">第 8 章</span>
+          <div class="title">构建一个简单的社交网络</div>
+          <div class="desc">用户/状态、时间线、关注关系、发帖扇出策略、流式 API</div>
+        </a>
+        <a class="chapter-card" href="ch09.html">
+          <span class="num">第 9 章</span>
+          <div class="title">降低内存占用</div>
+          <div class="desc">紧凑结构编码（ziplist→listpack）、分片结构、位打包</div>
+        </a>
+        <a class="chapter-card" href="ch10.html">
+          <span class="num">第 10 章</span>
+          <div class="title">扩展 Redis</div>
+          <div class="desc">只读从库、可写查询从库、手工分片方案与 Redis Cluster 的对照</div>
+        </a>
+        <a class="chapter-card" href="ch11.html">
+          <span class="num">第 11 章</span>
+          <div class="title">用 Lua 给 Redis 写脚本</div>
+          <div class="desc">EVAL/EVALSHA、锁/信号量/自动补全/交易的 Lua 重写、Redis Functions</div>
+        </a>
+        <a class="chapter-card" href="chA.html">
+          <span class="num">附录 A</span>
+          <div class="title">快速搭建环境（现代版）</div>
+          <div class="desc">Docker/APT/Homebrew 安装、Django 与 Hono.js 接入示例</div>
+        </a>
+      </div>
+
+      <h2 class="section-label">补充章节（原书未覆盖，按现代互联网实践新增）</h2>
+      <div class="chapter-grid">
+        <a class="chapter-card" href="ch12.html">
+          <span class="num">第 12 章 · 补充</span>
+          <div class="title">安全与访问控制</div>
+          <div class="desc">ACL 最小权限账号、TLS、protected-mode、生产安全清单</div>
+        </a>
+        <a class="chapter-card" href="ch13.html">
+          <span class="num">第 13 章 · 补充</span>
+          <div class="title">用 Redis 做限流</div>
+          <div class="desc">固定/滑动窗口、令牌桶、GCRA（redis-cell）、Hono.js 限流中间件</div>
+        </a>
+        <a class="chapter-card" href="ch14.html">
+          <span class="num">第 14 章 · 补充</span>
+          <div class="title">可观测性与生产排障</div>
+          <div class="desc">SLOWLOG/LATENCY/MEMORY、maxmemory-policy、Prometheus+Grafana、RedisInsight</div>
+        </a>
+        <a class="chapter-card" href="ch15.html">
+          <span class="num">第 15 章 · 补充</span>
+          <div class="title">Redis 与 AI 应用</div>
+          <div class="desc">RediSearch 向量检索、RAG 集成、语义缓存</div>
+        </a>
+      </div>
+
+      <div class="index-footer">
+        <p><strong>阅读建议</strong>：如果你从未用过 Redis，按第 1→11 章顺序读，附录 A 可以随时穿插用来搭环境。如果你已经熟悉 Redis 基础，想直接看"这本 2013 年的书哪些地方过时了"，重点看第 9、10、11 章（编码方式、分片方案、脚本机制都有实质性演进），以及第 3 章的命令对照表。</p>
+        <p>原书基于 Redis 2.6（2012），本笔记写作时最新稳定版是 Redis 8.x / Valkey 8.x（2024-2025）。中间跨越的关键版本节点：2.8（SCAN、HyperLogLog）、3.0（Redis Cluster）、3.2（GEO、BITFIELD）、4.0（模块系统、HSET 多字段、RDB+AOF 混合持久化）、5.0（Streams）、6.0（RESP3、ACL、客户端缓存）、6.2（统一 ZRANGE、LMOVE、COPY）、7.0（Functions、多部分 AOF）、7.4（HASH 字段级 TTL）、8.0（原生 JSON/概率数据结构/向量检索并入核心）。</p>
+      </div>
+    </div>
+  </main>
 </div>
-
-<h2 class="section-label">补充章节（原书未覆盖，按现代互联网实践新增）</h2>
-<div class="chapter-grid">
-  <a class="chapter-card" href="ch12.html">
-    <span class="num">第 12 章 · 补充</span>
-    <div class="title">安全与访问控制</div>
-    <div class="desc">ACL 最小权限账号、TLS、protected-mode、生产安全清单</div>
-  </a>
-  <a class="chapter-card" href="ch13.html">
-    <span class="num">第 13 章 · 补充</span>
-    <div class="title">用 Redis 做限流</div>
-    <div class="desc">固定/滑动窗口、令牌桶、GCRA（redis-cell）、Hono.js 限流中间件</div>
-  </a>
-  <a class="chapter-card" href="ch14.html">
-    <span class="num">第 14 章 · 补充</span>
-    <div class="title">可观测性与生产排障</div>
-    <div class="desc">SLOWLOG/LATENCY/MEMORY、maxmemory-policy、Prometheus+Grafana、RedisInsight</div>
-  </a>
-  <a class="chapter-card" href="ch15.html">
-    <span class="num">第 15 章 · 补充</span>
-    <div class="title">Redis 与 AI 应用</div>
-    <div class="desc">RediSearch 向量检索、RAG 集成、语义缓存</div>
-  </a>
-</div>
-
-<div class="index-footer">
-  <p><strong>阅读建议</strong>：如果你从未用过 Redis，按第 1→11 章顺序读，附录 A 可以随时穿插用来搭环境。如果你已经熟悉 Redis 基础，想直接看"这本 2013 年的书哪些地方过时了"，重点看第 9、10、11 章（编码方式、分片方案、脚本机制都有实质性演进），以及第 3 章的命令对照表。</p>
-  <p>原书基于 Redis 2.6（2012），本笔记写作时最新稳定版是 Redis 8.x / Valkey 8.x（2024-2025）。中间跨越的关键版本节点：2.8（SCAN、HyperLogLog）、3.0（Redis Cluster）、3.2（GEO、BITFIELD）、4.0（模块系统、HSET 多字段、RDB+AOF 混合持久化）、5.0（Streams）、6.0（RESP3、ACL、客户端缓存）、6.2（统一 ZRANGE、LMOVE、COPY）、7.0（Functions、多部分 AOF）、7.4（HASH 字段级 TTL）、8.0（原生 JSON/概率数据结构/向量检索并入核心）。</p>
-</div>
+<script src="assets/page.js" defer></script>
 </body>
 </html>
