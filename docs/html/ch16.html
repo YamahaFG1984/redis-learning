@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 16 章（补充）数据分层与结构选型方法论 — Redis in Action 现代化笔记</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23d92d20'/%3E%3Ctext x='50' y='69' font-size='56' font-family='Arial, sans-serif' font-weight='700' fill='white' text-anchor='middle'%3ER%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/lua.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+</head>
+<body>
+<button class="nav-toggle" id="navToggle" aria-label="打开章节目录"><span></span><span></span><span></span></button>
+<div class="nav-backdrop" id="navBackdrop"></div>
+<div class="shell">
+  <nav class="sidenav" id="sidenav">
+  <a class="sidenav-brand" href="index.html"><span class="title">Redis in Action</span><span class="subtitle">现代化学习笔记</span></a>
+  <div class="sidenav-label">原书章节</div>
+  <a class="sidenav-link" href="ch01.html"><span class="n">01</span><span>认识 Redis</span></a>
+  <a class="sidenav-link" href="ch02.html"><span class="n">02</span><span>剖析一个 Redis Web 应用</span></a>
+  <a class="sidenav-link" href="ch03.html"><span class="n">03</span><span>Redis 命令大全</span></a>
+  <a class="sidenav-link" href="ch04.html"><span class="n">04</span><span>保障数据安全与性能</span></a>
+  <a class="sidenav-link" href="ch05.html"><span class="n">05</span><span>用 Redis 支撑应用运维</span></a>
+  <a class="sidenav-link" href="ch06.html"><span class="n">06</span><span>构建应用组件</span></a>
+  <a class="sidenav-link" href="ch07.html"><span class="n">07</span><span>基于搜索的应用</span></a>
+  <a class="sidenav-link" href="ch08.html"><span class="n">08</span><span>构建一个简单的社交网络</span></a>
+  <a class="sidenav-link" href="ch09.html"><span class="n">09</span><span>降低内存占用</span></a>
+  <a class="sidenav-link" href="ch10.html"><span class="n">10</span><span>扩展 Redis</span></a>
+  <a class="sidenav-link" href="ch11.html"><span class="n">11</span><span>用 Lua 给 Redis 写脚本</span></a>
+  <a class="sidenav-link" href="chA.html"><span class="n">A</span><span>快速搭建环境（现代版）</span></a>
+  <div class="sidenav-label">补充章节</div>
+  <a class="sidenav-link" href="ch12.html"><span class="n">12</span><span>安全与访问控制</span></a>
+  <a class="sidenav-link" href="ch13.html"><span class="n">13</span><span>用 Redis 做限流</span></a>
+  <a class="sidenav-link" href="ch14.html"><span class="n">14</span><span>可观测性与生产排障</span></a>
+  <a class="sidenav-link" href="ch15.html"><span class="n">15</span><span>Redis 与 AI 应用</span></a>
+  <a class="sidenav-link" href="ch16.html"><span class="n">16</span><span>数据分层与结构选型方法论</span></a>
+  </nav>
+  <main class="content">
+    <div class="content-inner">
+      <article>
+      <span class="eyebrow">第 16 章 · 补充</span>
+<h1>第 16 章（补充）数据分层与结构选型方法论</h1>
+    <blockquote><p>本章不对应原书任何一章,而是这本笔记在教学过程中被反复问到的一个问题:"以前 Redis 用得少,写业务的时候该把哪些数据放数据库、哪些放 Redis、放 Redis 又该选哪种类型,缺一套自己的判断方法论"。原书通篇都在用具体案例(投票系统、购物车、时间线)演示"该用哪个结构",但没有把背后的判断逻辑单独总结成方法论——本章把它显式化。</p></blockquote>
+
+    <h2>16.1 第一层判断:这份数据该进数据库还是 Redis</h2>
+    <p>把 Redis 默认当成"可能丢"的存储来设计——即使开了 RDB/AOF 持久化,主从切换、机器故障时仍有丢数据的窗口。围绕这个前提,依次问自己四个问题:</p>
+    <ol>
+      <li><strong>丢了这份数据,后果有多严重?</strong> 会有财务/法律/客诉后果(订单、支付、账户余额、合同、交易流水)→ 必须落 DB,Redis 最多做加速层。丢了顶多体验差一点、能重算或重新拉取(缓存、排行榜、推荐结果、会话)→ 可以放 Redis。</li>
+      <li><strong>这份数据是"真相源"还是"衍生数据"?</strong> System of Record(用户资料、订单、审计日志)→ DB 存,Redis 顶多缓存一份。Derived data(热度榜、聚合统计、搜索索引)→ 天然适合 Redis,丢了可以从源头重建。Ephemeral(会话、验证码、限流计数、分布式锁)→ 不该进 DB,这类数据生来就有 TTL,Redis 的 <code>EXPIRE</code> 是原生能力,DB 反而要自己写清理逻辑。</li>
+      <li><strong>需要的是"速度"还是 Redis 的"原子能力"?</strong> 有些场景不是"数据库查询慢所以缓存一下",而是问题本身就该用 Redis 结构建模:高并发原子自增/自减(库存扣减、点赞数)、自动维持排序(排行榜)、集合运算(共同好友、标签匹配)、极低成本去重计数(UV)、分布式锁/限流原语。这类场景第一反应就该是 Redis,不管数据量大不大。</li>
+      <li><strong>访问模式是不是"读多写少 + 延迟敏感"?</strong> 如果是,且数据集符合二八定律(20% 热数据占 80% 访问量)→ 经典缓存模式:全量在 DB,热数据子集缓存到 Redis。如果需要复杂多条件查询/JOIN/全文检索,Redis 不擅长,该用 DB 或专门的搜索引擎(见第 7、15 章)。</li>
+    </ol>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    Start(["一份数据要不要放 Redis？"]) --> Q1{"丢了后果严重吗？<br/>财务/法律/客诉"}
+    Q1 -- 是 --> DB["落数据库<br/>Redis 最多做加速层"]
+    Q1 -- 否 --> Q2{"是真相源还是衍生/临时数据？"}
+    Q2 -- 真相源 --> DB
+    Q2 -- "衍生数据(可重算)" --> Redis1["放 Redis"]
+    Q2 -- "临时数据(会话/验证码/锁)" --> Redis1
+    Q1 -- 否 --> Q3{"需要 Redis 原子能力吗？<br/>自增/排序/集合运算/去重计数"}
+    Q3 -- 是 --> Redis1
+    Q3 -- 否 --> Q4{"读多写少 + 延迟敏感？<br/>数据符合二八定律"}
+    Q4 -- 是 --> Redis2["DB 存全量<br/>Redis 缓存热数据子集"]
+    Q4 -- 否，需要复杂查询/JOIN/全文检索 --> DB
+      </div>
+      <figcaption>DB vs Redis 的第一层判断：默认把 Redis 当"可丢失"存储设计</figcaption>
+    </figure>
+
+    <h2>16.2 第二层判断:进了 Redis 该选哪个结构</h2>
+    <p>拿到一份要放 Redis 的数据,按顺序问自己:</p>
+
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+    A(["这是一个值，还是一组值？"]) -- 一个值 --> STR["STRING<br/>数字/字符串/序列化对象"]
+    A -- 一组值 --> B{"有没有字段结构，像个对象？"}
+    B -- "有，且常单独读/改某字段" --> HASH["HASH"]
+    B -- 否 --> C{"需不需要排序？"}
+    C -- "按分数(时间/热度)排序" --> ZSET["ZSET"]
+    C -- "只需存在判断/去重/交并差" --> SET["SET"]
+    C -- "保持插入顺序，当队列/栈" --> LIST["LIST"]
+    C -- "事件流，多消费者+ack" --> STREAM["Stream"]
+    C -- "海量布尔状态" --> BITMAP["Bitmap"]
+    C -- "只要去重计数不要具体是谁" --> HLL["HyperLogLog"]
+    C -- 地理位置附近查询 --> GEO["Geo"]
+      </div>
+      <figcaption>选结构的判断顺序：先问"一个值还是一组值"，再逐步细化</figcaption>
+    </figure>
+
+    <p><strong>一个新手最容易纠结的点——STRING 存 JSON,还是用 HASH?</strong></p>
+    <ul>
+      <li>总是整存整取,不需要单独改某个字段 → STRING 存 JSON,序列化简单。</li>
+      <li>经常只改一两个字段(购物车只改某个商品数量)→ HASH,避免整体反序列化再序列化。</li>
+      <li>HASH 还有个内存优势:小 HASH 会用紧凑的 listpack 编码存储,比一堆零散的 STRING key 更省内存(细节见第 9 章)。</li>
+    </ul>
+
+    <h2>16.3 常见业务场景速查表</h2>
+    <table>
+      <thead><tr><th>场景</th><th>结构</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr><td>用户登录会话</td><td>HASH</td><td>字段化,可单独续期/改字段</td></tr>
+        <tr><td>排行榜/热度榜</td><td>ZSET</td><td>自带排序</td></tr>
+        <tr><td>分布式锁</td><td>STRING（<code>SET NX EX</code>）</td><td>原子性 + 自动过期</td></tr>
+        <tr><td>限流计数器</td><td>STRING（<code>INCR</code>）或 ZSET（滑动窗口）</td><td>原子自增</td></tr>
+        <tr><td>关注关系</td><td>SET 或 ZSET</td><td>集合运算/按时间排序</td></tr>
+        <tr><td>Feed 时间线</td><td>ZSET</td><td>按时间排序</td></tr>
+        <tr><td>购物车</td><td>HASH</td><td>按商品字段增减</td></tr>
+        <tr><td>消息队列（需 ack/多消费者）</td><td>Stream</td><td>原生支持消费组</td></tr>
+        <tr><td>签到/打卡</td><td>Bitmap</td><td>海量布尔状态省内存</td></tr>
+        <tr><td>网站 UV 去重计数</td><td>HyperLogLog</td><td>12KB 存近似基数</td></tr>
+        <tr><td>库存扣减</td><td>STRING（<code>DECR</code>）</td><td>原子操作防止超卖</td></tr>
+        <tr><td>验证码/一次性 token</td><td>STRING + <code>EXPIRE</code></td><td>天然临时数据</td></tr>
+      </tbody>
+    </table>
+
+    <h2>16.4 三语言示例:12 个高频场景</h2>
+    <p>以下每个场景假设已建好连接:Python 用 <code>r = redis.Redis(decode_responses=True)</code>(redis-py),Java 用 <code>UnifiedJedis jedis = new UnifiedJedis(...)</code>,TypeScript 用 <code>const redis = new Redis()</code>(ioredis)。</p>
+
+    <h3>16.4.1 用户登录会话（HASH）</h3>
+<pre><code class="language-python">import uuid, time
+
+def create_session(user_id: str) -> str:
+    token = str(uuid.uuid4())
+    r.hset(f"session:{token}", mapping={"user_id": user_id, "login_at": time.time()})
+    r.expire(f"session:{token}", 3600)
+    return token
+
+def get_session(token: str) -> dict | None:
+    data = r.hgetall(f"session:{token}")
+    return data or None
+</code></pre>
+<pre><code class="language-java">import java.util.Map;
+import java.util.UUID;
+
+public static String createSession(String userId) {
+    String token = UUID.randomUUID().toString();
+    jedis.hset("session:" + token, Map.of(
+        "user_id", userId, "login_at", String.valueOf(System.currentTimeMillis() / 1000.0)
+    ));
+    jedis.expire("session:" + token, 3600);
+    return token;
+}
+
+public static Map&lt;String, String&gt; getSession(String token) {
+    Map&lt;String, String&gt; data = jedis.hgetAll("session:" + token);
+    return data.isEmpty() ? null : data;
+}
+</code></pre>
+<pre><code class="language-typescript">import { randomUUID } from "crypto";
+
+export async function createSession(userId: string): Promise&lt;string&gt; {
+  const token = randomUUID();
+  await redis.hset(`session:${token}`, { user_id: userId, login_at: Date.now() / 1000 });
+  await redis.expire(`session:${token}`, 3600);
+  return token;
+}
+
+export async function getSession(token: string) {
+  const data = await redis.hgetall(`session:${token}`);
+  return Object.keys(data).length ? data : null;
+}
+</code></pre>
+
+    <h3>16.4.2 排行榜/热度榜（ZSET）</h3>
+<pre><code class="language-python">def add_score(board: str, member: str, score: float):
+    r.zincrby(board, score, member)
+
+def top_n(board: str, n: int = 10):
+    return r.zrevrange(board, 0, n - 1, withscores=True)
+</code></pre>
+<pre><code class="language-java">import redis.clients.jedis.resps.Tuple;
+import java.util.List;
+
+public static void addScore(String board, String member, double score) {
+    jedis.zincrby(board, score, member);
+}
+
+public static List&lt;Tuple&gt; topN(String board, int n) {
+    return jedis.zrevrangeWithScores(board, 0, n - 1);
+}
+</code></pre>
+<pre><code class="language-typescript">export async function addScore(board: string, member: string, score: number) {
+  await redis.zincrby(board, score, member);
+}
+
+export async function topN(board: string, n = 10) {
+  return redis.zrevrange(board, 0, n - 1, "WITHSCORES");
+}
+</code></pre>
+
+    <h3>16.4.3 分布式锁（STRING，SET NX EX + Lua 校验归属再释放）</h3>
+<pre><code class="language-python">import uuid
+
+UNLOCK_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+def acquire_lock(lock_key: str, ttl: int = 10) -> str | None:
+    token = str(uuid.uuid4())
+    ok = r.set(lock_key, token, nx=True, ex=ttl)
+    return token if ok else None
+
+def release_lock(lock_key: str, token: str) -> bool:
+    return bool(r.eval(UNLOCK_SCRIPT, 1, lock_key, token))
+</code></pre>
+<pre><code class="language-java">import redis.clients.jedis.params.SetParams;
+import java.util.Collections;
+import java.util.UUID;
+
+static final String UNLOCK_SCRIPT =
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+
+public static String acquireLock(String lockKey, int ttlSeconds) {
+    String token = UUID.randomUUID().toString();
+    String ok = jedis.set(lockKey, token, SetParams.setParams().nx().ex(ttlSeconds));
+    return "OK".equals(ok) ? token : null;
+}
+
+public static boolean releaseLock(String lockKey, String token) {
+    Object result = jedis.eval(UNLOCK_SCRIPT, Collections.singletonList(lockKey), Collections.singletonList(token));
+    return Long.valueOf(1).equals(result);
+}
+</code></pre>
+<pre><code class="language-typescript">import { randomUUID } from "crypto";
+
+const UNLOCK_SCRIPT = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+`;
+
+export async function acquireLock(lockKey: string, ttl = 10): Promise&lt;string | null&gt; {
+  const token = randomUUID();
+  const ok = await redis.set(lockKey, token, "EX", ttl, "NX");
+  return ok ? token : null;
+}
+
+export async function releaseLock(lockKey: string, token: string): Promise&lt;boolean&gt; {
+  const result = await redis.eval(UNLOCK_SCRIPT, 1, lockKey, token);
+  return result === 1;
+}
+</code></pre>
+
+    <h3>16.4.4 限流计数器（STRING，固定窗口 INCR；滑动窗口版见第 13 章）</h3>
+<pre><code class="language-python">import time
+
+def is_allowed(user_id: str, limit: int = 100, window: int = 60) -> bool:
+    key = f"ratelimit:{user_id}:{int(time.time()) // window}"
+    count = r.incr(key)
+    if count == 1:
+        r.expire(key, window)
+    return count <= limit
+</code></pre>
+<pre><code class="language-java">public static boolean isAllowed(String userId, int limit, int window) {
+    long bucket = System.currentTimeMillis() / 1000 / window;
+    String key = "ratelimit:" + userId + ":" + bucket;
+    long count = jedis.incr(key);
+    if (count == 1) jedis.expire(key, window);
+    return count <= limit;
+}
+</code></pre>
+<pre><code class="language-typescript">export async function isAllowed(userId: string, limit = 100, window = 60): Promise&lt;boolean&gt; {
+  const bucket = Math.floor(Date.now() / 1000 / window);
+  const key = `ratelimit:${userId}:${bucket}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, window);
+  return count <= limit;
+}
+</code></pre>
+
+    <h3>16.4.5 关注关系（ZSET，score 存关注时间，顺带能按时间排序）</h3>
+<pre><code class="language-python">def follow(user_id: str, target_id: str):
+    now = time.time()
+    r.zadd(f"following:{user_id}", {target_id: now})
+    r.zadd(f"followers:{target_id}", {user_id: now})
+
+def is_following(user_id: str, target_id: str) -> bool:
+    return r.zscore(f"following:{user_id}", target_id) is not None
+</code></pre>
+<pre><code class="language-java">public static void follow(String userId, String targetId) {
+    double now = System.currentTimeMillis() / 1000.0;
+    jedis.zadd("following:" + userId, now, targetId);
+    jedis.zadd("followers:" + targetId, now, userId);
+}
+
+public static boolean isFollowing(String userId, String targetId) {
+    return jedis.zscore("following:" + userId, targetId) != null;
+}
+</code></pre>
+<pre><code class="language-typescript">export async function follow(userId: string, targetId: string) {
+  const now = Date.now() / 1000;
+  await redis.zadd(`following:${userId}`, now, targetId);
+  await redis.zadd(`followers:${targetId}`, now, userId);
+}
+
+export async function isFollowing(userId: string, targetId: string) {
+  return (await redis.zscore(`following:${userId}`, targetId)) !== null;
+}
+</code></pre>
+
+    <h3>16.4.6 Feed 时间线（ZSET，发帖时 fan-out 写入粉丝时间线）</h3>
+<pre><code class="language-python">def post_and_fanout(user_id: str, post_id: str):
+    now = time.time()
+    followers = r.zrange(f"followers:{user_id}", 0, -1)
+    pipe = r.pipeline()
+    for follower_id in followers:
+        pipe.zadd(f"timeline:{follower_id}", {post_id: now})
+        pipe.zremrangebyrank(f"timeline:{follower_id}", 0, -1001)  # 只留最近1000条
+    pipe.execute()
+
+def get_timeline(user_id: str, count: int = 20):
+    return r.zrevrange(f"timeline:{user_id}", 0, count - 1)
+</code></pre>
+<pre><code class="language-java">import java.util.List;
+
+public static void postAndFanout(String userId, String postId) {
+    double now = System.currentTimeMillis() / 1000.0;
+    List&lt;String&gt; followers = jedis.zrange("followers:" + userId, 0, -1);
+    for (String followerId : followers) {
+        jedis.zadd("timeline:" + followerId, now, postId);
+        jedis.zremrangeByRank("timeline:" + followerId, 0, -1001);
+    }
+}
+
+public static List&lt;String&gt; getTimeline(String userId, int count) {
+    return jedis.zrevrange("timeline:" + userId, 0, count - 1);
+}
+</code></pre>
+<pre><code class="language-typescript">export async function postAndFanout(userId: string, postId: string) {
+  const now = Date.now() / 1000;
+  const followers = await redis.zrange(`followers:${userId}`, 0, -1);
+  const pipeline = redis.pipeline();
+  for (const followerId of followers) {
+    pipeline.zadd(`timeline:${followerId}`, now, postId);
+    pipeline.zremrangebyrank(`timeline:${followerId}`, 0, -1001);
+  }
+  await pipeline.exec();
+}
+
+export async function getTimeline(userId: string, count = 20) {
+  return redis.zrevrange(`timeline:${userId}`, 0, count - 1);
+}
+</code></pre>
+
+    <h3>16.4.7 购物车（HASH）</h3>
+<pre><code class="language-python">def add_to_cart(user_id: str, sku: str, qty: int):
+    r.hincrby(f"cart:{user_id}", sku, qty)
+
+def get_cart(user_id: str) -> dict:
+    return r.hgetall(f"cart:{user_id}")
+</code></pre>
+<pre><code class="language-java">import java.util.Map;
+
+public static void addToCart(String userId, String sku, long qty) {
+    jedis.hincrBy("cart:" + userId, sku, qty);
+}
+
+public static Map&lt;String, String&gt; getCart(String userId) {
+    return jedis.hgetAll("cart:" + userId);
+}
+</code></pre>
+<pre><code class="language-typescript">export async function addToCart(userId: string, sku: string, qty: number) {
+  await redis.hincrby(`cart:${userId}`, sku, qty);
+}
+
+export async function getCart(userId: string) {
+  return redis.hgetall(`cart:${userId}`);
+}
+</code></pre>
+
+    <h3>16.4.8 消息队列（Stream，带消费组 + ack）</h3>
+<pre><code class="language-python">def produce(stream: str, payload: dict):
+    r.xadd(stream, payload)
+
+def consume(stream: str, group: str, consumer: str, count: int = 10):
+    try:
+        r.xgroup_create(stream, group, id="0", mkstream=True)
+    except redis.ResponseError:
+        pass  # 消费组已存在
+    entries = r.xreadgroup(group, consumer, {stream: ">"}, count=count)
+    for _, messages in entries or []:
+        for msg_id, fields in messages:
+            process(fields)
+            r.xack(stream, group, msg_id)
+</code></pre>
+<pre><code class="language-java">import redis.clients.jedis.StreamEntryID;
+import redis.clients.jedis.params.XReadGroupParams;
+import redis.clients.jedis.resps.StreamEntry;
+import java.util.Map;
+
+public static void produce(String stream, Map&lt;String, String&gt; payload) {
+    jedis.xadd(stream, StreamEntryID.NEW_ENTRY, payload);
+}
+
+public static void consume(String stream, String group, String consumer) {
+    var entries = jedis.xreadGroup(group, consumer,
+        XReadGroupParams.xReadGroupParams().count(10),
+        Map.of(stream, StreamEntryID.UNRECEIVED_ENTRY));
+    if (entries == null) return;
+    for (var entry : entries) {
+        for (StreamEntry e : entry.getValue()) {
+            process(e.getFields());
+            jedis.xack(stream, group, e.getID());
+        }
+    }
+}
+</code></pre>
+<pre><code class="language-typescript">export async function produce(stream: string, payload: Record&lt;string, string&gt;) {
+  const fields = Object.entries(payload).flat();
+  await redis.xadd(stream, "*", ...fields);
+}
+
+export async function consume(stream: string, group: string, consumer: string) {
+  try {
+    await redis.xgroup("CREATE", stream, group, "0", "MKSTREAM");
+  } catch {
+    // 消费组已存在
+  }
+  const res = await redis.xreadgroup("GROUP", group, consumer, "COUNT", 10, "STREAMS", stream, ">");
+  if (!res) return;
+  for (const [, messages] of res as any) {
+    for (const [id, fields] of messages) {
+      process(fields);
+      await redis.xack(stream, group, id);
+    }
+  }
+}
+</code></pre>
+
+    <h3>16.4.9 签到/打卡（Bitmap）</h3>
+<pre><code class="language-python">def check_in(user_id: str, day_of_month: int, month_key: str):
+    r.setbit(f"checkin:{user_id}:{month_key}", day_of_month - 1, 1)
+
+def checkin_count(user_id: str, month_key: str) -> int:
+    return r.bitcount(f"checkin:{user_id}:{month_key}")
+</code></pre>
+<pre><code class="language-java">public static void checkIn(String userId, int dayOfMonth, String monthKey) {
+    jedis.setbit("checkin:" + userId + ":" + monthKey, dayOfMonth - 1, true);
+}
+
+public static long checkinCount(String userId, String monthKey) {
+    return jedis.bitcount("checkin:" + userId + ":" + monthKey);
+}
+</code></pre>
+<pre><code class="language-typescript">export async function checkIn(userId: string, dayOfMonth: number, monthKey: string) {
+  await redis.setbit(`checkin:${userId}:${monthKey}`, dayOfMonth - 1, 1);
+}
+
+export async function checkinCount(userId: string, monthKey: string) {
+  return redis.bitcount(`checkin:${userId}:${monthKey}`);
+}
+</code></pre>
+
+    <h3>16.4.10 网站 UV 去重计数（HyperLogLog）</h3>
+<pre><code class="language-python">def record_visit(page: str, user_id: str, today: str):
+    r.pfadd(f"uv:{page}:{today}", user_id)
+
+def get_uv(page: str, today: str) -> int:
+    return r.pfcount(f"uv:{page}:{today}")
+</code></pre>
+<pre><code class="language-java">public static void recordVisit(String page, String userId, String today) {
+    jedis.pfadd("uv:" + page + ":" + today, userId);
+}
+
+public static long getUv(String page, String today) {
+    return jedis.pfcount("uv:" + page + ":" + today);
+}
+</code></pre>
+<pre><code class="language-typescript">export async function recordVisit(page: string, userId: string, today: string) {
+  await redis.pfadd(`uv:${page}:${today}`, userId);
+}
+
+export async function getUv(page: string, today: string) {
+  return redis.pfcount(`uv:${page}:${today}`);
+}
+</code></pre>
+
+    <h3>16.4.11 库存扣减（STRING，Lua 保证"检查够不够 + 扣减"原子）</h3>
+<pre><code class="language-python">DEDUCT_SCRIPT = """
+local stock = tonumber(redis.call('get', KEYS[1]) or '0')
+if stock < tonumber(ARGV[1]) then
+    return -1
+end
+return redis.call('decrby', KEYS[1], ARGV[1])
+"""
+
+def deduct_stock(sku: str, qty: int) -> int:
+    return r.eval(DEDUCT_SCRIPT, 1, f"stock:{sku}", qty)  # -1 表示库存不足
+</code></pre>
+<pre><code class="language-java">import java.util.Collections;
+
+static final String DEDUCT_SCRIPT =
+    "local stock = tonumber(redis.call('get', KEYS[1]) or '0') " +
+    "if stock < tonumber(ARGV[1]) then return -1 end " +
+    "return redis.call('decrby', KEYS[1], ARGV[1])";
+
+public static long deductStock(String sku, int qty) {
+    Object result = jedis.eval(DEDUCT_SCRIPT,
+        Collections.singletonList("stock:" + sku),
+        Collections.singletonList(String.valueOf(qty)));
+    return (Long) result;
+}
+</code></pre>
+<pre><code class="language-typescript">const DEDUCT_SCRIPT = `
+local stock = tonumber(redis.call('get', KEYS[1]) or '0')
+if stock < tonumber(ARGV[1]) then
+    return -1
+end
+return redis.call('decrby', KEYS[1], ARGV[1])
+`;
+
+export async function deductStock(sku: string, qty: number): Promise&lt;number&gt; {
+  return redis.eval(DEDUCT_SCRIPT, 1, `stock:${sku}`, qty) as Promise&lt;number&gt;;
+}
+</code></pre>
+
+    <h3>16.4.12 验证码/一次性 token（STRING + EXPIRE，验证后立即删除防重放）</h3>
+<pre><code class="language-python">import random
+
+def send_code(phone: str) -> str:
+    code = f"{random.randint(0, 999999):06d}"
+    r.set(f"otp:{phone}", code, ex=300)
+    return code
+
+def verify_code(phone: str, code: str) -> bool:
+    key = f"otp:{phone}"
+    saved = r.get(key)
+    if saved == code:
+        r.delete(key)
+        return True
+    return False
+</code></pre>
+<pre><code class="language-java">import java.util.concurrent.ThreadLocalRandom;
+
+public static String sendCode(String phone) {
+    String code = String.format("%06d", ThreadLocalRandom.current().nextInt(1_000_000));
+    jedis.setex("otp:" + phone, 300, code);
+    return code;
+}
+
+public static boolean verifyCode(String phone, String code) {
+    String key = "otp:" + phone;
+    String saved = jedis.get(key);
+    if (code.equals(saved)) {
+        jedis.del(key);
+        return true;
+    }
+    return false;
+}
+</code></pre>
+<pre><code class="language-typescript">export async function sendCode(phone: string): Promise&lt;string&gt; {
+  const code = String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0");
+  await redis.set(`otp:${phone}`, code, "EX", 300);
+  return code;
+}
+
+export async function verifyCode(phone: string, code: string): Promise&lt;boolean&gt; {
+  const key = `otp:${phone}`;
+  const saved = await redis.get(key);
+  if (saved === code) {
+    await redis.del(key);
+    return true;
+  }
+  return false;
+}
+</code></pre>
+
+    <h2>16.5 常见反模式</h2>
+    <ul>
+      <li><strong>把 Redis 当成唯一存储去存不能丢的数据</strong>——没有 DB 兜底的"真相源",出故障就是真丢。</li>
+      <li><strong>不管什么数据都用 STRING 存整个 JSON</strong>——该用 HASH/ZSET 建模的结构化数据硬塞进字符串,应用层要反复整体序列化/反序列化,也丧失了 Redis 原生的原子操作能力。</li>
+      <li><strong>单个 key 存超大 value</strong>(几十 MB 的大列表/大 JSON)——读写会阻塞,也容易造成内存碎片,详见第 9 章。</li>
+      <li><strong>缓存了但没设计失效策略</strong>——导致缓存和数据库不一致,或引发缓存穿透/击穿/雪崩,详见第 2 章页面缓存部分。</li>
+    </ul>
+
+    <div class="callout">
+      <div class="callout-title">本章小结</div>
+      <p>这套方法论的核心是两层过滤:第一层判断"这份数据能不能丢、是不是真相源",决定它该不该进 Redis;第二层判断"这是一个值还是一组值、要不要排序、要不要原子运算",决定选哪个结构。原书用一个个具体案例(投票系统、购物车、时间线)教会你怎么做,这一章把背后反复出现的判断逻辑显式地总结出来——以后遇到新的业务需求,可以直接对照本章的两张决策图和速查表,而不必凭直觉猜。</p>
+    </div>
+
+    <nav class="pagenav">
+      <a href="ch15.html"><span class="dir">上一章</span>第 15 章 Redis 与 AI 应用</a>
+      <span class="placeholder">·</span>
+    </nav>
+      </article>
+    </div>
+  </main>
+  <aside class="page-toc">
+    <div class="page-toc-label">本页目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+</div>
+<script src="assets/page.js" defer></script>
+</body>
+</html>

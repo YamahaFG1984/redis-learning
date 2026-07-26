@@ -33,6 +33,7 @@
 | [第 13 章](ch13.md) | 用 Redis 做限流 | 固定/滑动窗口、令牌桶、GCRA（redis-cell）、Hono.js 限流中间件 |
 | [第 14 章](ch14.md) | 可观测性与生产排障 | SLOWLOG/LATENCY/MEMORY、maxmemory-policy、Prometheus+Grafana、RedisInsight |
 | [第 15 章](ch15.md) | Redis 与 AI 应用 | RediSearch 向量检索、RAG 集成、语义缓存 |
+| [第 16 章](ch16.md) | 数据分层与结构选型方法论 | DB vs Redis 决策图、结构选型决策树、12 个高频场景三语言示例 |
 
 ## 阅读建议
 
