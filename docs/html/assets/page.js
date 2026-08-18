@@ -109,6 +109,11 @@
       var header = document.createElement("div");
       header.className = "code-block-header";
 
+      var dots = document.createElement("span");
+      dots.className = "code-block-dots";
+      dots.setAttribute("aria-hidden", "true");
+      dots.innerHTML = "<i></i><i></i><i></i>";
+
       var langLabel = document.createElement("span");
       langLabel.className = "code-block-lang";
       langLabel.textContent = lang;
@@ -130,6 +135,7 @@
           .catch(function () {});
       });
 
+      header.appendChild(dots);
       header.appendChild(langLabel);
       header.appendChild(btn);
 
